@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Services Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/opt/telegram-services-bot
+EnvironmentFile=/etc/telegram-services-bot/bot.env
+ExecStart=/opt/telegram-services-bot/.venv/bin/python /opt/telegram-services-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f4b913">
+<title>ملاحظات ColorNote — {{ source_name }}</title>
+<style>
+:root{
+  --bg:#f4f5f7;--panel:#ffffff;--panel-soft:#fafafa;--text:#181b20;--muted:#69717d;
+  --line:#e4e7ec;--accent:#f4bd22;--accent-strong:#c88f00;--accent-soft:#fff6cf;
+  --success:#067647;--success-soft:#ecfdf3;--warning:#93370d;--warning-soft:#fef0c7;
+  --shadow:0 14px 40px rgba(16,24,40,.09);--radius:18px;--tap:48px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;background:var(--bg)}
+body{
+  margin:0;min-height:100vh;min-height:100dvh;background:var(--bg);color:var(--text);
+  font-family:Tahoma,"Segoe UI",Arial,sans-serif;overflow-x:hidden;
+}
+body.dark{
+  --bg:#101317;--panel:#191d22;--panel-soft:#15191e;--text:#f5f7fa;--muted:#a6afbb;
+  --line:#2b3138;--accent-soft:#31280e;--shadow:0 14px 40px rgba(0,0,0,.32);
+}
+body.modal-open{overflow:hidden}
+button,input,select{font:inherit}
+button{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.hidden{display:none!important}
+
+.top{
+  position:sticky;top:0;z-index:20;border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+}
+body.dark .top{background:rgba(25,29,34,.96)}
+.topin{max-width:1440px;margin:auto;padding:11px 18px;display:grid;gap:10px}
+.topline{display:grid;grid-template-columns:auto minmax(260px,1fr) auto;gap:12px;align-items:center}
+.brand{display:flex;align-items:center;gap:10px;min-width:220px}
+.logo{
+  width:42px;height:42px;flex:0 0 42px;border-radius:13px;background:linear-gradient(145deg,#ffda5c,#efb30c);
+  display:grid;place-items:center;font-weight:900;color:#251d03;box-shadow:inset 0 0 0 1px rgba(0,0,0,.04)
+}
+.brand strong,.brand small{display:block}
+.brand strong{font-size:15px}
+.brand small{max-width:230px;margin-top:2px;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.search{position:relative;min-width:0}
+.search input{
+  width:100%;height:46px;border:1px solid var(--line);background:var(--panel-soft);color:var(--text);
+  border-radius:14px;padding:0 42px 0 13px;outline:0;font-size:14px;
+}
+.search input:focus{border-color:#d5a40d;box-shadow:0 0 0 3px rgba(242,189,34,.16)}
+.search-icon{position:absolute;right:15px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+.actions{display:flex;gap:8px}
+.icon-btn,.filter-toggle{
+  min-height:var(--tap);border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:13px;cursor:pointer
+}
+.icon-btn{width:48px;padding:0;font-size:19px}
+.filter-toggle{display:none;padding:0 13px;font-size:13px;font-weight:700;align-items:center;justify-content:center;gap:7px}
+.filter-badge{
+  min-width:20px;height:20px;padding:0 5px;border-radius:999px;background:var(--accent);color:#231a00;
+  display:inline-grid;place-items:center;font-size:10px;font-weight:900
+}
+.filter-badge.zero{display:none}
+.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.field{display:grid;gap:5px;min-width:0}
+.field label{font-size:10px;color:var(--muted);padding-inline:3px}
+.field select{
+  width:100%;height:43px;border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:12px;padding:0 11px;outline:0;min-width:0
+}
+
+.main{max-width:1440px;margin:auto;padding:24px 18px calc(70px + env(safe-area-inset-bottom))}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:18px}
+.head h1{font-size:28px;line-height:1.25;margin:0 0 6px}
+.head p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+.count{
+  flex:0 0 auto;background:var(--panel);border:1px solid var(--line);padding:8px 12px;border-radius:999px;
+  color:var(--muted);font-size:11px;white-space:nowrap
+}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.card{
+  width:100%;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:17px;
+  text-align:right;color:inherit;cursor:pointer;min-height:210px;display:flex;flex-direction:column;
+  box-shadow:0 3px 14px rgba(16,24,40,.03);transition:transform .16s,border-color .16s,box-shadow .16s
+}
+.card:hover{transform:translateY(-2px);border-color:#e3be48;box-shadow:var(--shadow)}
+.card:focus-visible{outline:3px solid rgba(242,189,34,.35);outline-offset:2px}
+.ct{
+  font-size:16px;font-weight:850;line-height:1.55;margin:0;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden
+}
+.cp{
+  font-size:12px;color:var(--muted);line-height:1.85;white-space:pre-line;margin:12px 0 17px;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden
+}
+.cf{
+  margin-top:auto;border-top:1px solid var(--line);padding-top:11px;color:#8a929d;font-size:10px;
+  display:flex;justify-content:space-between;gap:8px;align-items:center
+}
+.pills{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px}
+.pill{
+  font-size:9px;border-radius:999px;padding:5px 7px;background:var(--accent-soft);color:var(--accent-strong);
+  white-space:nowrap
+}
+.pill.binary{background:var(--warning-soft);color:var(--warning)}
+.pill.changed{background:var(--success-soft);color:var(--success)}
+.empty{text-align:center;padding:64px 16px;color:var(--muted);line-height:1.8}
+
+.modal{
+  position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+  padding:18px;padding-top:max(18px,env(safe-area-inset-top));padding-bottom:max(18px,env(safe-area-inset-bottom))
+}
+.backdrop{position:absolute;inset:0;border:0;background:rgba(9,12,16,.68);backdrop-filter:blur(4px)}
+.dialog{
+  position:relative;width:min(920px,100%);max-height:min(90vh,860px);max-height:min(90dvh,860px);
+  background:var(--panel);border:1px solid var(--line);border-radius:24px;box-shadow:0 35px 95px rgba(0,0,0,.34);
+  display:flex;flex-direction:column;overflow:hidden;min-height:0
+}
+.dh{
+  flex:0 0 auto;display:flex;justify-content:space-between;align-items:flex-start;gap:16px;
+  padding:19px 22px;border-bottom:1px solid var(--line);background:var(--panel)
+}
+.dh-copy{min-width:0}
+.dh h2{font-size:22px;line-height:1.5;margin:4px 0 0;overflow-wrap:anywhere}
+.date{font-size:10px;color:var(--muted)}
+.close{
+  flex:0 0 44px;width:44px;height:44px;border:1px solid var(--line);border-radius:13px;
+  background:var(--panel);color:var(--text);font-size:25px;line-height:1;cursor:pointer
+}
+.meta{
+  flex:0 0 auto;padding:9px 22px;background:var(--bg);border-bottom:1px solid var(--line);
+  display:flex;gap:6px;overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:thin
+}
+.chip{
+  flex:0 0 auto;font-size:9px;border:1px solid var(--line);background:var(--panel);
+  border-radius:999px;padding:6px 8px;color:var(--muted);white-space:nowrap
+}
+.body{
+  flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+  padding:24px 26px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:2;font-size:16px
+}
+.df{
+  flex:0 0 auto;display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;
+  padding-bottom:max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--panel)
+}
+.btn{
+  min-height:44px;border:1px solid var(--line);background:var(--panel);color:var(--text);
+  padding:9px 14px;border-radius:11px;cursor:pointer
+}
+.btn.primary{background:linear-gradient(180deg,#f8cf48,#edb412);border-color:#daa300;color:#211900;font-weight:800}
+.toast{
+  position:fixed;left:50%;bottom:max(20px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:80;
+  max-width:calc(100vw - 28px);background:#15171a;color:#fff;border-radius:999px;padding:10px 16px;font-size:11px;
+  text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.22)
+}
+
+@media(max-width:900px){
+  .topin{padding:9px 12px}
+  .topline{grid-template-columns:1fr auto;gap:9px}
+  .brand{min-width:0}
+  .brand small{max-width:56vw}
+  .search{grid-column:1/-1;grid-row:2}
+  .actions{grid-column:2;grid-row:1}
+  .filter-toggle{display:inline-flex}
+  .filters{display:none;grid-template-columns:1fr;gap:8px;padding-top:2px}
+  .filters.open{display:grid}
+  .field{grid-template-columns:90px minmax(0,1fr);align-items:center;gap:8px}
+  .field label{font-size:11px}
+  .main{padding:18px 12px calc(54px + env(safe-area-inset-bottom))}
+  .head{align-items:flex-start}
+  .head h1{font-size:24px}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .card{min-height:185px;padding:15px}
+}
+@media(max-width:620px){
+  .brand strong{font-size:14px}
+  .logo{width:38px;height:38px;flex-basis:38px;border-radius:12px}
+  .brand small{font-size:9px;max-width:48vw}
+  .icon-btn{width:44px;min-height:44px}
+  .filter-toggle{min-height:44px;padding-inline:11px;font-size:12px}
+  .search input{height:44px;font-size:16px}
+  .main{padding-top:14px}
+  .head{margin-bottom:12px;gap:10px;align-items:center}
+  .head h1{font-size:21px;margin-bottom:3px}
+  .head p{display:none}
+  .count{font-size:10px;padding:7px 9px}
+  .grid{grid-template-columns:1fr;gap:9px}
+  .card{min-height:0;padding:14px 15px;border-radius:16px}
+  .ct{font-size:15px;-webkit-line-clamp:2}
+  .cp{font-size:12px;line-height:1.75;margin:9px 0 12px;-webkit-line-clamp:3}
+  .cf{padding-top:9px}
+  .modal{padding:0;align-items:flex-end}
+  .dialog{
+    width:100%;height:100vh;height:100dvh;max-height:none;border:0;border-radius:0;box-shadow:none
+  }
+  .dh{
+    position:sticky;top:0;z-index:2;padding:calc(10px + env(safe-area-inset-top)) 14px 11px;
+    align-items:center
+  }
+  .dh h2{font-size:18px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .date{font-size:9px}
+  .close{width:44px;height:44px;flex-basis:44px}
+  .meta{padding:8px 14px}
+  .body{padding:18px 15px 28px;font-size:16px;line-height:1.95}
+  .df{
+    gap:7px;padding:9px 10px;padding-bottom:max(9px,env(safe-area-inset-bottom));
+    box-shadow:0 -5px 18px rgba(0,0,0,.04)
+  }
+  .btn{flex:1;min-height:48px;padding:8px 6px;font-size:12px}
+}
+@media(max-width:380px){
+  .filter-toggle .filter-label{display:none}
+  .field{grid-template-columns:76px minmax(0,1fr)}
+  .head h1{font-size:19px}
+  .card{padding:13px}
+}
+@media print{
+  .top,.head,.df,.meta{display:none!important}.main{padding:0}.grid{display:none}.modal{position:static;padding:0;display:block!important}
+  .backdrop{display:none}.dialog{width:100%;height:auto;max-height:none;border:0;box-shadow:none}.body{overflow:visible;padding:0;font-size:14pt}
+  .dh{border:0;padding:0 0 18px}.close{display:none}.hidden{display:block!important}
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="topin">
+    <div class="topline">
+      <div class="brand">
+        <div class="logo">N</div>
+        <div><strong>ملاحظات ColorNote</strong><small>{{ source_name }}</small></div>
+      </div>
+      <div class="search">
+        <span class="search-icon">⌕</span>
+        <input id="q" type="search" inputmode="search" autocomplete="off" placeholder="ابحث في الملاحظات..." aria-label="البحث في الملاحظات">
+      </div>
+      <div class="actions">
+        <button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false" aria-controls="filters">
+          <span class="filter-label">تصفية وترتيب</span><span>☷</span><span class="filter-badge zero" id="filterBadge">0</span>
+        </button>
+        <button class="icon-btn" id="theme" type="button" aria-label="تبديل الوضع الليلي">◐</button>
+      </div>
+    </div>
+    <div class="filters" id="filters">
+      <div class="field"><label for="textFilter">حالة النص</label><select id="textFilter"><option value="all">كل حالات النص</option></select></div>
+      <div class="field"><label for="backupFilter">حالة النسخ</label><select id="backupFilter"><option value="all">كل حالات النسخ</option></select></div>
+      <div class="field"><label for="sort">الترتيب</label><select id="sort"><option value="new">الأحدث تعديلًا</option><option value="old">الأقدم تعديلًا</option><option value="title">حسب العنوان</option></select></div>
+    </div>
+  </div>
+</header>
+
+<main class="main">
+  <div class="head">
+    <div><h1>كل الملاحظات</h1><p>ابحث وفلتر ثم اضغط على أي بطاقة لفتح الملاحظة كاملة.</p></div>
+    <span class="count" id="count"></span>
+  </div>
+  <section class="grid" id="grid" aria-live="polite"></section>
+  <div class="empty hidden" id="empty">لا توجد ملاحظات مطابقة للبحث والفلاتر الحالية.</div>
+</main>
+
+<div class="modal hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="mtitle">
+  <button class="backdrop" id="backdrop" type="button" aria-label="إغلاق"></button>
+  <article class="dialog">
+    <header class="dh">
+      <div class="dh-copy"><span class="date" id="mdate"></span><h2 id="mtitle"></h2></div>
+      <button class="close" id="close" type="button" aria-label="العودة إلى الملاحظات">×</button>
+    </header>
+    <div class="meta" id="meta"></div>
+    <div class="body" id="mtext"></div>
+    <footer class="df">
+      <button class="btn" id="copy" type="button">نسخ</button>
+      <button class="btn" type="button" onclick="window.print()">طباعة</button>
+      <button class="btn primary" id="done" type="button">رجوع</button>
+    </footer>
+  </article>
+</div>
+<div class="toast hidden" id="toast"></div>
+
+<script>
+const NOTES={{ notes_json | safe }};
+let filtered=[...NOTES],current=null;
+const $=s=>document.querySelector(s);
+
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+function fmt(v){
+  if(!v)return'غير متوفر';
+  const d=new Date(v);
+  if(Number.isNaN(d.getTime()))return v;
+  return new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(d)
+}
+function prev(t,n=260){
+  const x=String(t||'').replace(/\s+/g,' ').trim();
+  return x.length>n?x.slice(0,n)+'…':(x||'ملاحظة فارغة')
+}
+function textStatusLabel(n){
+  return n.text_status==='utf16le_repaired'?'ترميز مُصحّح':n.text_status==='binary'?'بيانات ثنائية':n.encrypted?'معلّمة كمشفّرة':'نص أصلي'
+}
+function isMultiBackup(n){
+  return Number(n.backup_occurrences||1)>1||(Array.isArray(n.source_files)&&n.source_files.length>1)
+}
+function matchTextStatus(n,f){
+  if(f==='all')return true;
+  if(f==='original')return n.text_status==='original'&&!n.encrypted;
+  if(f==='repaired')return n.text_status==='utf16le_repaired';
+  if(f==='binary')return n.text_status==='binary';
+  if(f==='encrypted')return Boolean(n.encrypted);
+  return true
+}
+function matchBackupStatus(n,f){
+  if(f==='all')return true;
+  if(f==='changed')return Boolean(n.changed_across_backups);
+  if(f==='multi')return isMultiBackup(n);
+  if(f==='single')return !isMultiBackup(n);
+  return true
+}
+function populateFilters(){
+  const textDefs=[
+    ['all','كل حالات النص',()=>true],
+    ['original','نص أصلي',n=>n.text_status==='original'&&!n.encrypted],
+    ['repaired','ترميز مُصحّح',n=>n.text_status==='utf16le_repaired'],
+    ['binary','بيانات ثنائية',n=>n.text_status==='binary'],
+    ['encrypted','معلّمة كمشفّرة',n=>Boolean(n.encrypted)]
+  ];
+  const backupDefs=[
+    ['all','كل حالات النسخ',()=>true],
+    ['changed','تغيّرت بين النسخ',n=>Boolean(n.changed_across_backups)],
+    ['multi','ظهرت في عدة Backups',isMultiBackup],
+    ['single','ظهرت في Backup واحد',n=>!isMultiBackup(n)]
+  ];
+  $('#textFilter').innerHTML=textDefs.map(([v,l,t])=>`<option value="${v}">${l} (${NOTES.filter(t).length})</option>`).join('');
+  $('#backupFilter').innerHTML=backupDefs.map(([v,l,t])=>`<option value="${v}">${l} (${NOTES.filter(t).length})</option>`).join('')
+}
+function updateFilterButton(){
+  const active=($('#textFilter').value!=='all'?1:0)+($('#backupFilter').value!=='all'?1:0)+($('#sort').value!=='new'?1:0);
+  const badge=$('#filterBadge');
+  badge.textContent=String(active);
+  badge.classList.toggle('zero',active===0)
+}
+function render(){
+  const q=$('#q').value.trim().toLocaleLowerCase('ar'),tf=$('#textFilter').value,bf=$('#backupFilter').value;
+  filtered=NOTES.filter(n=>{
+    const sources=Array.isArray(n.source_files)?n.source_files.join(' '):(n.source_file||'');
+    const haystack=`${n.title||''} ${n.text||''} ${n.tags||''} ${sources}`.toLocaleLowerCase('ar');
+    return (!q||haystack.includes(q))&&matchTextStatus(n,tf)&&matchBackupStatus(n,bf)
+  });
+  const s=$('#sort').value;
+  filtered.sort((a,b)=>{
+    if(s==='title')return String(a.title||'').localeCompare(String(b.title||''),'ar');
+    const av=new Date(a.modified||a.created||0).getTime()||0,bv=new Date(b.modified||b.created||0).getTime()||0;
+    return s==='old'?av-bv:bv-av
+  });
+  $('#count').textContent=`${filtered.length} من ${NOTES.length}`;
+  $('#empty').classList.toggle('hidden',filtered.length>0);
+  $('#grid').innerHTML=filtered.map((n,i)=>{
+    const labels=[];
+    if(n.changed_across_backups)labels.push('<span class="pill changed">أحدث نسخة</span>');
+    if(n.text_status==='utf16le_repaired')labels.push('<span class="pill">ترميز مُصحّح</span>');
+    if(n.text_status==='binary')labels.push('<span class="pill binary">بيانات ثنائية</span>');
+    return `<button class="card" type="button" data-id="${esc(n.uuid)}">
+      <div><div class="pills">${labels.join('')}</div><h3 class="ct">${esc(n.title||'ملاحظة بدون عنوان')}</h3></div>
+      <div class="cp">${esc(prev(n.text))}</div>
+      <div class="cf"><span>${esc(fmt(n.modified||n.created))}</span><span>#${i+1}</span></div>
+    </button>`
+  }).join('');
+  document.querySelectorAll('.card').forEach(c=>c.addEventListener('click',()=>openNote(c.dataset.id)));
+  updateFilterButton()
+}
+function openNote(id){
+  current=NOTES.find(n=>String(n.uuid)===String(id));
+  if(!current)return;
+  $('#mtitle').textContent=current.title||'ملاحظة بدون عنوان';
+  $('#mdate').textContent='آخر تعديل: '+fmt(current.modified||current.created);
+  $('#mtext').textContent=current.text||'';
+  const sources=Array.isArray(current.source_files)&&current.source_files.length?current.source_files.join('، '):(current.source_file||'غير متوفر');
+  $('#meta').innerHTML=
+    `<span class="chip">الإنشاء: ${esc(fmt(current.created))}</span>`+
+    `<span class="chip">حالة النص: ${esc(textStatusLabel(current))}</span>`+
+    `<span class="chip">النسخة المختارة: ${esc(current.source_file||'غير متوفر')}</span>`+
+    `<span class="chip">ظهرت في: ${esc(sources)}</span>`+
+    `${current.changed_across_backups?`<span class="chip">تم اختيار الأحدث من ${esc(current.distinct_versions||2)} نسخ مختلفة</span>`:''}`;
+  $('#modal').classList.remove('hidden');
+  document.body.classList.add('modal-open');
+  $('#close').focus()
+}
+function closeNote(){
+  $('#modal').classList.add('hidden');
+  document.body.classList.remove('modal-open')
+}
+function toast(m){
+  const e=$('#toast');e.textContent=m;e.classList.remove('hidden');
+  clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.add('hidden'),1300)
+}
+function toggleFilters(){
+  const panel=$('#filters'),button=$('#filterToggle'),open=!panel.classList.contains('open');
+  panel.classList.toggle('open',open);button.setAttribute('aria-expanded',String(open))
+}
+
+$('#q').addEventListener('input',render);
+$('#textFilter').addEventListener('change',render);
+$('#backupFilter').addEventListener('change',render);
+$('#sort').addEventListener('change',render);
+$('#filterToggle').addEventListener('click',toggleFilters);
+$('#close').addEventListener('click',closeNote);
+$('#done').addEventListener('click',closeNote);
+$('#backdrop').addEventListener('click',closeNote);
+$('#copy').addEventListener('click',async()=>{
+  if(!current)return;
+  try{await navigator.clipboard.writeText(current.text||'');toast('تم النسخ')}
+  catch{toast('تعذر النسخ')}
+});
+$('#theme').addEventListener('click',()=>{
+  document.body.classList.toggle('dark');
+  try{localStorage.setItem('cn-view-theme',document.body.classList.contains('dark')?'dark':'light')}catch{}
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#modal').classList.contains('hidden'))closeNote()});
+window.addEventListener('resize',()=>{
+  if(window.innerWidth>900){
+    $('#filters').classList.remove('open');
+    $('#filterToggle').setAttribute('aria-expanded','false')
+  }
+});
+try{if(localStorage.getItem('cn-view-theme')==='dark')document.body.classList.add('dark')}catch{}
+populateFilters();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+services:
+  telegram-services-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telegram-services-bot:latest
+    container_name: telegram-services-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      REMBG_HOME: /data/rembg
+      TMPDIR: /tmp
+      NUMBA_CACHE_DIR: /tmp/numba
+      XDG_CACHE_HOME: /tmp/cache
+    volumes:
+      - rembg-models:/data/rembg
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    mem_limit: ${BOT_MEMORY_LIMIT:-4g}
+    cpus: ${BOT_CPU_LIMIT:-2.0}
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  rembg-models:

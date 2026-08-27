@@ -1,0 +1,10 @@
+.env
+.venv/
+.test-venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.rembg/
+output/
+*.zip

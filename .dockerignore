@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.venv
+.test-venv
+venv
+validation_env
+__pycache__
+**/__pycache__
+.pytest_cache
+tests
+*.pyc
+*.zip
+tmp*
+pip-*
