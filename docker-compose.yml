@@ -11,6 +11,7 @@ services:
       - .env
     environment:
       REMBG_HOME: /data/rembg
+      U2NET_HOME: /data/rembg
       TMPDIR: /tmp
       NUMBA_CACHE_DIR: /tmp/numba
       XDG_CACHE_HOME: /tmp/cache

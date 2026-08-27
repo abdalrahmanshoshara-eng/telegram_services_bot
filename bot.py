@@ -34,8 +34,11 @@ from services.file_services import (
     create_qr_code,
     extract_pdf_pages,
     images_to_pdf,
+    manage_pdf_pages,
     merge_pdfs,
     optimize_image,
+    protect_pdf,
+    unprotect_pdf,
     watermark_pdf,
 )
 from services.colornote import (
@@ -48,6 +51,12 @@ from services.excel_contacts import (
     ExcelContactsError,
     convert_excel_contacts,
 )
+from services.excel_tools import (
+    ExcelToolsError,
+    clean_excel_workbook,
+    merge_excel_workbooks,
+    split_excel_workbook,
+)
 from services.ocr_services import ocr_image
 from services.word_formatter import format_word_tables
 
@@ -55,6 +64,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# HTTP client INFO logs contain the Telegram bot token in request URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 PROCESSING_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -284,12 +296,22 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     service_id = service["id"]
-    if service_id in {"merge_pdf", "images_to_pdf", "colornote_to_html"}:
+    if service_id in {
+        "merge_pdf",
+        "images_to_pdf",
+        "colornote_to_html",
+        "merge_excel",
+    }:
         stage = "collecting"
         if service_id == "colornote_to_html":
             instruction = (
                 "أرسل ملف Backup واحدًا أو عدة ملفات واحدًا تلو الآخر، "
                 "ثم اضغط «انتهيت»."
+            )
+        elif service_id == "merge_excel":
+            instruction = (
+                "أرسل ملفات XLSX واحدًا تلو الآخر، ثم اضغط «انتهيت» "
+                "لاختيار طريقة الدمج."
             )
         else:
             instruction = (
@@ -305,6 +327,9 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
             "أرسل ملف XLSX أو XLS الآن. يجب أن يحتوي الصف الأول على الأعمدة:\n"
             "الاسم الكامل | رقم التواصل | البريد الالكتروني"
         )
+    elif service_id in {"clean_excel", "split_excel"}:
+        stage = "waiting_file"
+        instruction = "أرسل ملف XLSX الآن."
     else:
         stage = "waiting_file"
         instruction = "أرسل الملف الآن."
@@ -377,7 +402,12 @@ async def on_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _handle_processing_error(message, status, service_id: str, error: Exception) -> None:
     if isinstance(
         error,
-        (ServiceInputError, ExcelContactsError, ColorNoteConversionError),
+        (
+            ServiceInputError,
+            ExcelContactsError,
+            ExcelToolsError,
+            ColorNoteConversionError,
+        ),
     ):
         await message.reply_text(str(error))
     elif isinstance(error, (TimeoutError, ProcessingTimeoutError)):
@@ -416,6 +446,18 @@ async def process_single_file(message, context, job: dict, meta: dict) -> None:
                     await status.edit_text("⏳ جارٍ استخراج النص من الصورة...")
                     await run_blocking(ocr_image, source, output, OCR_LANG)
                     caption = "✅ تم استخراج النص."
+                elif service_id == "clean_excel":
+                    output = root / "cleaned_workbook.xlsx"
+                    await status.edit_text("⏳ جارٍ تنظيف ملف Excel...")
+                    summary = await run_blocking(
+                        clean_excel_workbook, source, output
+                    )
+                    caption = (
+                        "✅ اكتمل تنظيف ملف Excel.\n"
+                        f"الصفوف الفارغة المحذوفة: {summary['blank_rows']} | "
+                        f"المكررة المحذوفة: {summary['duplicate_rows']} | "
+                        f"الخلايا المنظفة: {summary['trimmed_cells']}"
+                    )
                 else:
                     raise ServiceInputError("الخدمة المحددة لا تعالج ملفًا مباشرًا.")
             await send_result(message, output, caption)
@@ -436,7 +478,12 @@ async def collect_file(message, context, job: dict, meta: dict) -> None:
             )
         file_limit = MAX_COLORNOTE_FILES
     else:
-        allowed = {".pdf"} if service_id == "merge_pdf" else IMAGE_EXTENSIONS
+        if service_id == "merge_pdf":
+            allowed = {".pdf"}
+        elif service_id == "merge_excel":
+            allowed = {".xlsx"}
+        else:
+            allowed = IMAGE_EXTENSIONS
         validate_attachment(meta, allowed)
         file_limit = MAX_MULTI_FILES
     if len(job["files"]) >= file_limit:
@@ -459,7 +506,7 @@ async def finish_collection(message, context: ContextTypes.DEFAULT_TYPE) -> None
     if not job or job.get("stage") != "collecting":
         await message.reply_text("لا توجد ملفات قيد التجميع.")
         return
-    minimum = 2 if job["service"] == "merge_pdf" else 1
+    minimum = 2 if job["service"] in {"merge_pdf", "merge_excel"} else 1
     if len(job["files"]) < minimum:
         await message.reply_text(f"أرسل {minimum} ملف/ملفات على الأقل قبل التنفيذ.")
         return
@@ -475,6 +522,32 @@ async def finish_collection(message, context: ContextTypes.DEFAULT_TYPE) -> None
                         InlineKeyboardButton(
                             "🔐 استخدام كلمة المرور 0000",
                             callback_data="colornote:default_password",
+                        )
+                    ],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                ]
+            ),
+        )
+        return
+
+    if job["service"] == "merge_excel":
+        job["stage"] = "waiting_excel_merge_mode"
+        await message.reply_text(
+            "اختر طريقة الدمج:\n"
+            "• دمج الصفوف: يتطلب تطابق عناوين الأعمدة في الأوراق النشطة.\n"
+            "• جمع الأوراق: يضع جميع أوراق الملفات داخل مصنف واحد.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📋 دمج الصفوف في ورقة واحدة",
+                            callback_data="excelmerge:rows",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "📚 جمع الملفات كأوراق",
+                            callback_data="excelmerge:sheets",
                         )
                     ],
                     [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
@@ -528,6 +601,163 @@ async def process_split(message, context, job: dict, page_spec: str) -> None:
         await finish_success(message, context)
     except Exception as error:
         await _handle_processing_error(message, status, job["service"], error)
+
+
+async def process_pdf_page_management(
+    message,
+    context,
+    operation: str,
+    page_spec: str,
+    angle: int = 90,
+) -> None:
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "manage_pdf_pages" or "source" not in job:
+        await message.reply_text("ابدأ خدمة إدارة صفحات PDF من القائمة أولًا.")
+        return
+    status = await message.reply_text("⏳ جارٍ معالجة صفحات PDF...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_pdf_pages_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / "input.pdf"
+            output = root / "managed_pages.pdf"
+            await download_meta(context, job["source"], source)
+            async with PROCESSING_SEMAPHORE:
+                summary = await run_blocking(
+                    manage_pdf_pages,
+                    source,
+                    output,
+                    operation,
+                    page_spec,
+                    angle,
+                )
+            operation_text = {
+                "rotate": "تدوير الصفحات",
+                "delete": "حذف الصفحات",
+                "reorder": "إعادة ترتيب الصفحات",
+            }[operation]
+            await send_result(
+                message,
+                output,
+                f"✅ اكتملت عملية {operation_text}. "
+                f"عدد صفحات النتيجة: {summary['pages']}.",
+            )
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "manage_pdf_pages", error)
+
+
+async def process_pdf_password(message, context, password: str) -> None:
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "pdf_password" or "source" not in job:
+        await message.reply_text("ابدأ خدمة حماية PDF من القائمة أولًا.")
+        return
+    action = job.get("pdf_password_action")
+    if action not in {"protect", "unprotect"}:
+        await message.reply_text("اختر حماية الملف أو فك الحماية أولًا.")
+        return
+    status = await message.reply_text("⏳ جارٍ معالجة حماية ملف PDF...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_pdf_password_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / "input.pdf"
+            output = root / (
+                "protected_document.pdf"
+                if action == "protect"
+                else "unprotected_document.pdf"
+            )
+            await download_meta(context, job["source"], source)
+            async with PROCESSING_SEMAPHORE:
+                if action == "protect":
+                    pages = await run_blocking(
+                        protect_pdf, source, output, password
+                    )
+                    caption = f"✅ تم تشفير ملف PDF وعدد صفحاته {pages}."
+                else:
+                    pages = await run_blocking(
+                        unprotect_pdf, source, output, password
+                    )
+                    caption = f"✅ تم فك حماية ملف PDF وعدد صفحاته {pages}."
+            await send_result(message, output, caption)
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "pdf_password", error)
+
+
+async def process_excel_split(message, context, column_selector: str) -> None:
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "split_excel" or "source" not in job:
+        await message.reply_text("ابدأ خدمة تقسيم Excel من القائمة أولًا.")
+        return
+    status = await message.reply_text("⏳ جارٍ تقسيم ملف Excel...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_excel_split_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / "input.xlsx"
+            output = root / "split_workbook.zip"
+            await download_meta(context, job["source"], source)
+            async with PROCESSING_SEMAPHORE:
+                summary = await run_blocking(
+                    split_excel_workbook, source, output, column_selector
+                )
+            caption = (
+                "✅ اكتمل تقسيم ملف Excel.\n"
+                f"الملفات الناتجة: {summary['groups']} | "
+                f"صفوف البيانات: {summary['rows']} | "
+                f"صفوف بلا قيمة: {summary['skipped']}"
+            )
+            await send_result(message, output, caption)
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "split_excel", error)
+
+
+async def process_excel_merge(message, context, mode: str) -> None:
+    job = context.user_data.get("job")
+    if (
+        not job
+        or job.get("service") != "merge_excel"
+        or job.get("stage") != "waiting_excel_merge_mode"
+        or len(job.get("files", [])) < 2
+    ):
+        await message.reply_text("ابدأ خدمة دمج Excel وأرسل ملفين على الأقل.")
+        return
+    if mode not in {"rows", "sheets"}:
+        await message.reply_text("طريقة الدمج غير معروفة.")
+        return
+
+    status = await message.reply_text("⏳ جارٍ تنزيل ملفات Excel...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_excel_merge_") as temp_dir:
+            root = Path(temp_dir)
+            sources = []
+            for index, meta in enumerate(job["files"], start=1):
+                target = root / f"input_{index:02d}.xlsx"
+                await download_meta(context, meta, target)
+                sources.append((meta["name"], target))
+                await status.edit_text(
+                    f"⏳ تم تنزيل {index} من {len(job['files'])}..."
+                )
+            output = root / "merged_workbooks.xlsx"
+            async with PROCESSING_SEMAPHORE:
+                summary = await run_blocking(
+                    merge_excel_workbooks, sources, output, mode
+                )
+            if mode == "rows":
+                details = f"الصفوف المدمجة: {summary['rows']}"
+            else:
+                details = f"الأوراق المدمجة: {summary['sheets']}"
+            await send_result(
+                message,
+                output,
+                f"✅ تم دمج {summary['files']} ملفات Excel. {details}.",
+            )
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "merge_excel", error)
 
 
 async def process_image_option(message, context, operation: str) -> None:
@@ -722,15 +952,69 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "format_word": {".docx"},
             "remove_background": IMAGE_EXTENSIONS,
             "split_pdf": {".pdf"},
+            "manage_pdf_pages": {".pdf"},
+            "pdf_password": {".pdf"},
             "optimize_image": IMAGE_EXTENSIONS,
             "watermark_pdf": {".pdf"},
             "ocr_image": IMAGE_EXTENSIONS,
             "excel_to_vcf": {".xlsx", ".xls"},
+            "clean_excel": {".xlsx"},
+            "split_excel": {".xlsx"},
         }
         validate_attachment(meta, allowed_by_service.get(service_id, set()))
         if service_id == "split_pdf":
             job.update({"source": meta, "stage": "waiting_pages"})
             await message.reply_text("أرسل الصفحات المطلوبة، مثال: 1-3,5,8", reply_markup=job_keyboard())
+        elif service_id == "manage_pdf_pages":
+            job.update({"source": meta, "stage": "choosing_pdf_page_operation"})
+            await message.reply_text(
+                "اختر عملية إدارة الصفحات:",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🔄 تدوير صفحات",
+                                callback_data="pdfpages:rotate",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🗑️ حذف صفحات",
+                                callback_data="pdfpages:delete",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🔢 إعادة ترتيب الصفحات",
+                                callback_data="pdfpages:reorder",
+                            )
+                        ],
+                        [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                    ]
+                ),
+            )
+        elif service_id == "pdf_password":
+            job.update({"source": meta, "stage": "choosing_pdf_password_action"})
+            await message.reply_text(
+                "اختر العملية. فك الحماية يتطلب كلمة المرور الصحيحة:",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🔒 حماية الملف",
+                                callback_data="pdfsecurity:protect",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🔓 فك الحماية",
+                                callback_data="pdfsecurity:unprotect",
+                            )
+                        ],
+                        [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                    ]
+                ),
+            )
         elif service_id == "optimize_image":
             job.update({"source": meta, "stage": "choosing_image_operation"})
             await message.reply_text(
@@ -778,6 +1062,13 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ]
                 ),
             )
+        elif service_id == "split_excel":
+            job.update({"source": meta, "stage": "waiting_excel_split_column"})
+            await message.reply_text(
+                "أرسل اسم العمود الذي تريد التقسيم حسبه كما يظهر في الملف، "
+                "أو أرسل حرف العمود مثل B. يتم تقسيم الورقة النشطة.",
+                reply_markup=job_keyboard(),
+            )
         else:
             await process_single_file(message, context, job, meta)
     except Exception as error:
@@ -815,8 +1106,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await process_split(message, context, job, text)
     elif job["service"] == "watermark_pdf" and job["stage"] == "waiting_watermark_text":
         await process_watermark(message, context, text=text)
+    elif (
+        job["service"] == "manage_pdf_pages"
+        and job["stage"] == "waiting_pdf_rotate_pages"
+    ):
+        await process_pdf_page_management(
+            message,
+            context,
+            "rotate",
+            text,
+            int(job.get("pdf_rotation_angle", 90)),
+        )
+    elif (
+        job["service"] == "manage_pdf_pages"
+        and job["stage"] == "waiting_pdf_delete_pages"
+    ):
+        await process_pdf_page_management(message, context, "delete", text)
+    elif (
+        job["service"] == "manage_pdf_pages"
+        and job["stage"] == "waiting_pdf_reorder"
+    ):
+        await process_pdf_page_management(message, context, "reorder", text)
+    elif job["service"] == "pdf_password" and job["stage"] == "waiting_pdf_password":
+        await process_pdf_password(message, context, raw_text)
     elif job["service"] == "excel_to_vcf" and job["stage"] == "waiting_country_code":
         await process_excel_contacts(message, context, text)
+    elif (
+        job["service"] == "split_excel"
+        and job["stage"] == "waiting_excel_split_column"
+    ):
+        await process_excel_split(message, context, text)
     elif (
         job["service"] == "colornote_to_html"
         and job["stage"] == "waiting_colornote_password"
@@ -867,6 +1186,125 @@ async def on_watermark_option(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("أرسل صورة الشعار PNG أو JPG أو WEBP.", reply_markup=job_keyboard())
 
 
+async def on_pdf_pages_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    await query.answer()
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "manage_pdf_pages" or "source" not in job:
+        await query.message.reply_text("ابدأ خدمة إدارة صفحات PDF من القائمة أولًا.")
+        return
+    parts = query.data.split(":")
+    action = parts[1]
+    if action == "rotate":
+        job["stage"] = "choosing_pdf_rotation_angle"
+        await query.message.reply_text(
+            "اختر زاوية التدوير:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "↻ 90° مع عقارب الساعة",
+                            callback_data="pdfpages:angle:90",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "↺ 90° عكس عقارب الساعة",
+                            callback_data="pdfpages:angle:-90",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🔃 180°",
+                            callback_data="pdfpages:angle:180",
+                        )
+                    ],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                ]
+            ),
+        )
+    elif action == "angle" and len(parts) == 3:
+        try:
+            angle = int(parts[2])
+        except ValueError:
+            await query.message.reply_text("زاوية تدوير غير صحيحة.")
+            return
+        if angle not in {-90, 90, 180}:
+            await query.message.reply_text("زاوية تدوير غير صحيحة.")
+            return
+        job.update(
+            {
+                "stage": "waiting_pdf_rotate_pages",
+                "pdf_rotation_angle": angle,
+            }
+        )
+        await query.message.reply_text(
+            "أرسل أرقام الصفحات مثل 1-3,5 أو أرسل «الكل».",
+            reply_markup=job_keyboard(),
+        )
+    elif action == "delete":
+        job["stage"] = "waiting_pdf_delete_pages"
+        await query.message.reply_text(
+            "أرسل الصفحات التي تريد حذفها، مثال: 2,5-7",
+            reply_markup=job_keyboard(),
+        )
+    elif action == "reorder":
+        job["stage"] = "waiting_pdf_reorder"
+        await query.message.reply_text(
+            "أرسل ترتيب جميع الصفحات مرة واحدة، مثال لملف من 5 صفحات: "
+            "3,1,2,5-4",
+            reply_markup=job_keyboard(),
+        )
+    else:
+        await query.message.reply_text("خيار إدارة الصفحات غير معروف.")
+
+
+async def on_pdf_security_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    await query.answer()
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "pdf_password" or "source" not in job:
+        await query.message.reply_text("ابدأ خدمة حماية PDF من القائمة أولًا.")
+        return
+    action = query.data.split(":", 1)[1]
+    if action not in {"protect", "unprotect"}:
+        await query.message.reply_text("خيار حماية PDF غير معروف.")
+        return
+    job.update(
+        {
+            "stage": "waiting_pdf_password",
+            "pdf_password_action": action,
+        }
+    )
+    if action == "protect":
+        instruction = "أرسل كلمة مرور جديدة من 4 إلى 128 محرفًا."
+    else:
+        instruction = "أرسل كلمة المرور الحالية للملف."
+    await query.message.reply_text(
+        f"{instruction}\nلن تُحفظ كلمة المرور بعد انتهاء العملية.",
+        reply_markup=job_keyboard(),
+    )
+
+
+async def on_excel_merge_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    await query.answer()
+    await process_excel_merge(
+        query.message,
+        context,
+        query.data.split(":", 1)[1],
+    )
+
+
 async def on_excel_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -910,6 +1348,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_job_action, pattern=r"^job:"))
     app.add_handler(CallbackQueryHandler(on_image_option, pattern=r"^imgopt:"))
     app.add_handler(CallbackQueryHandler(on_watermark_option, pattern=r"^watermark:"))
+    app.add_handler(CallbackQueryHandler(on_pdf_pages_action, pattern=r"^pdfpages:"))
+    app.add_handler(
+        CallbackQueryHandler(on_pdf_security_action, pattern=r"^pdfsecurity:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(on_excel_merge_action, pattern=r"^excelmerge:")
+    )
     app.add_handler(CallbackQueryHandler(on_excel_action, pattern=r"^excel:"))
     app.add_handler(CallbackQueryHandler(on_colornote_action, pattern=r"^colornote:"))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, on_file))

@@ -87,6 +87,127 @@ def extract_pdf_pages(source: Path, destination: Path, page_spec: str) -> int:
     return len(pages)
 
 
+def parse_page_order(spec: str, page_count: int) -> list[int]:
+    normalized = spec.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    normalized = normalized.replace("،", ",").replace(" ", "")
+    if not normalized or not re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", normalized):
+        raise ServiceInputError("صيغة ترتيب الصفحات غير صحيحة. مثال: 3,1,2,5-4")
+
+    pages: list[int] = []
+    for part in normalized.split(","):
+        if "-" in part:
+            start, end = map(int, part.split("-", 1))
+            step = 1 if start <= end else -1
+            selected = range(start, end + step, step)
+        else:
+            selected = [int(part)]
+        for page_number in selected:
+            if not 1 <= page_number <= page_count:
+                raise ServiceInputError(
+                    f"رقم الصفحة {page_number} خارج الملف ({page_count} صفحة)."
+                )
+            zero_based = page_number - 1
+            if zero_based in pages:
+                raise ServiceInputError(f"الصفحة {page_number} مكررة في الترتيب.")
+            pages.append(zero_based)
+
+    if len(pages) != page_count or set(pages) != set(range(page_count)):
+        raise ServiceInputError(
+            "يجب أن يتضمن الترتيب جميع صفحات الملف مرة واحدة دون حذف أو تكرار."
+        )
+    return pages
+
+
+def manage_pdf_pages(
+    source: Path,
+    destination: Path,
+    operation: str,
+    page_spec: str,
+    angle: int = 90,
+) -> dict[str, int]:
+    reader = PdfReader(str(source), strict=False)
+    _validate_pdf(reader)
+    page_count = len(reader.pages)
+    writer = PdfWriter()
+
+    if operation == "rotate":
+        normalized = page_spec.strip().lower()
+        if normalized in {"all", "الكل", "كامل", "جميع"}:
+            selected = list(range(page_count))
+        else:
+            selected = parse_page_ranges(page_spec, page_count)
+        if angle not in {-90, 90, 180}:
+            raise ServiceInputError("زاوية التدوير يجب أن تكون 90 أو -90 أو 180 درجة.")
+        for index, page in enumerate(reader.pages):
+            if index in selected:
+                page.rotate(angle)
+            writer.add_page(page)
+        affected = len(selected)
+    elif operation == "delete":
+        selected = set(parse_page_ranges(page_spec, page_count))
+        if len(selected) == page_count:
+            raise ServiceInputError("لا يمكن حذف جميع صفحات الملف.")
+        for index, page in enumerate(reader.pages):
+            if index not in selected:
+                writer.add_page(page)
+        affected = len(selected)
+    elif operation == "reorder":
+        order = parse_page_order(page_spec, page_count)
+        for index in order:
+            writer.add_page(reader.pages[index])
+        affected = page_count
+    else:
+        raise ServiceInputError("عملية إدارة صفحات PDF غير معروفة.")
+
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+    with destination.open("wb") as stream:
+        writer.write(stream)
+    return {"pages": len(writer.pages), "affected": affected}
+
+
+def protect_pdf(source: Path, destination: Path, password: str) -> int:
+    password = password.strip()
+    if not 4 <= len(password) <= 128:
+        raise ServiceInputError("يجب أن تتكون كلمة المرور من 4 إلى 128 محرفًا.")
+    reader = PdfReader(str(source), strict=False)
+    if reader.is_encrypted:
+        raise ServiceInputError("الملف محمي مسبقًا. استخدم خدمة فك الحماية أولًا.")
+    _validate_pdf(reader)
+    writer = PdfWriter()
+    writer.append(reader)
+    writer.encrypt(
+        user_password=password,
+        owner_password=password,
+        algorithm="AES-256-R5",
+    )
+    with destination.open("wb") as stream:
+        writer.write(stream)
+    return len(reader.pages)
+
+
+def unprotect_pdf(source: Path, destination: Path, password: str) -> int:
+    if not password:
+        raise ServiceInputError("أرسل كلمة مرور الملف.")
+    reader = PdfReader(str(source), strict=False)
+    if not reader.is_encrypted:
+        raise ServiceInputError("الملف غير محمي بكلمة مرور.")
+    try:
+        result = reader.decrypt(password)
+    except Exception as error:
+        raise ServiceInputError("تعذر فك الملف. تحقق من كلمة المرور.") from error
+    if result == 0:
+        raise ServiceInputError("كلمة المرور غير صحيحة.")
+    if len(reader.pages) > MAX_PDF_PAGES:
+        raise ServiceInputError(f"عدد صفحات PDF يتجاوز الحد ({MAX_PDF_PAGES} صفحة).")
+
+    writer = PdfWriter()
+    writer.append(reader)
+    with destination.open("wb") as stream:
+        writer.write(stream)
+    return len(reader.pages)
+
+
 def images_to_pdf(sources: list[Path], destination: Path) -> None:
     if not sources:
         raise ServiceInputError("أرسل صورة واحدة على الأقل.")

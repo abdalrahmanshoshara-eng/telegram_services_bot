@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     REMBG_MODEL=u2netp \
     REMBG_HOME=/data/rembg \
+    U2NET_HOME=/data/rembg \
     OCR_LANG=ara+eng \
     TMPDIR=/tmp \
     NUMBA_CACHE_DIR=/tmp/numba \
