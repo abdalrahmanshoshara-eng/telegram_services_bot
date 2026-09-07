@@ -18,6 +18,7 @@ from telegram.ext import (
 
 from config import (
     BOT_TOKEN,
+    MAX_DECK_SLIDES,
     MAX_CONCURRENT_JOBS,
     MAX_MULTI_FILES,
     MAX_OUTPUT_MB,
@@ -56,6 +57,17 @@ from services.excel_tools import (
     clean_excel_workbook,
     merge_excel_workbooks,
     split_excel_workbook,
+)
+from services.pptx_deck import (
+    DEFAULT_SLIDE_COUNT,
+    DeckError,
+    SLIDE_COUNT_CHOICES,
+    api_key_present as gemini_key_present,
+    build_deck_outline,
+    outline_from_dict,
+    outline_preview,
+    outline_to_dict,
+    render_outline,
 )
 from services.ocr_services import ocr_image
 from services.word_formatter import format_word_tables
@@ -330,6 +342,12 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
     elif service_id in {"clean_excel", "split_excel"}:
         stage = "waiting_file"
         instruction = "أرسل ملف XLSX الآن."
+    elif service_id == "pptx_deck":
+        stage = "waiting_file"
+        instruction = (
+            "أرسل ملف PDF أو DOCX الآن.\n"
+            "سأستخرج محتواه ثم أعرض عليك مخطط الشرائح للموافقة قبل بناء العرض."
+        )
     else:
         stage = "waiting_file"
         instruction = "أرسل الملف الآن."
@@ -407,6 +425,7 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             ExcelContactsError,
             ExcelToolsError,
             ColorNoteConversionError,
+            DeckError,
         ),
     ):
         await message.reply_text(str(error))
@@ -924,6 +943,139 @@ async def process_colornote(message, context, password: str) -> None:
         await _handle_processing_error(message, status, "colornote_to_html", error)
 
 
+def deck_slides_keyboard() -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(f"{count} شريحة", callback_data=f"deck:slides:{count}")
+        for count in SLIDE_COUNT_CHOICES
+    ]
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")]])
+
+
+def deck_review_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ موافق - ابنِ العرض", callback_data="deck:approve")],
+            [InlineKeyboardButton("🔄 أعد إنشاء المخطط", callback_data="deck:retry")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+        ]
+    )
+
+
+async def start_deck_outline(message, context, organisation: str = "") -> None:
+    """Download the document, extract it, and ask the model for an outline."""
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "pptx_deck":
+        await message.reply_text("ابدأ الخدمة من جديد عبر /services.")
+        return
+
+    organisation = (organisation or "").strip()
+    if organisation in {"-", "/skip", "تخطي"}:
+        organisation = ""
+    if len(organisation) > 80:
+        await message.reply_text("اسم الجهة طويل جدًا. أرسل اسمًا أقصر.")
+        return
+    job["organisation"] = organisation
+    job["stage"] = "building_outline"
+
+    meta = job.get("source")
+    slide_count = min(int(job.get("slide_count", DEFAULT_SLIDE_COUNT)), MAX_DECK_SLIDES)
+    status = await message.reply_text("⏳ جارٍ استخراج النص من المستند...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_deck_") as temp_dir:
+            source = Path(temp_dir) / f"input{meta['suffix']}"
+            await download_meta(context, meta, source)
+            async with PROCESSING_SEMAPHORE:
+                await status.edit_text("⏳ جارٍ إعداد مخطط الشرائح...")
+                outline = await run_blocking(
+                    build_deck_outline, source, slide_count, organisation
+                )
+        job["outline"] = outline_to_dict(outline)
+        job["stage"] = "reviewing_deck_outline"
+        await status.delete()
+        await message.reply_text(
+            outline_preview(outline) + "\n\nراجع المخطط ثم اختر:",
+            reply_markup=deck_review_keyboard(),
+        )
+    except Exception as error:
+        await _handle_processing_error(message, status, "pptx_deck", error)
+        clear_job(context)
+
+
+async def process_deck_render(message, context) -> None:
+    """Build the .pptx from the outline the user approved."""
+    job = context.user_data.get("job")
+    if not job or not job.get("outline"):
+        await message.reply_text("انتهت صلاحية المخطط. ابدأ الخدمة من جديد عبر /services.")
+        clear_job(context)
+        return
+
+    organisation = job.get("organisation", "")
+    status = await message.reply_text("⏳ جارٍ بناء العرض التقديمي...")
+    try:
+        outline = outline_from_dict(job["outline"])
+        with tempfile.TemporaryDirectory(prefix="telegram_deck_") as temp_dir:
+            output = Path(temp_dir) / "presentation.pptx"
+            async with PROCESSING_SEMAPHORE:
+                await run_blocking(render_outline, outline, output, organisation)
+            caption = f"✅ تم إنشاء العرض التقديمي ({len(outline.slides)} شريحة)."
+            await send_result(message, output, caption)
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "pptx_deck", error)
+
+
+async def on_deck_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    message = query.message
+    job = context.user_data.get("job")
+    if not job or job.get("service") != "pptx_deck":
+        await message.reply_text("ابدأ الخدمة من جديد عبر /services.")
+        return
+
+    action = query.data.split(":", 1)[1]
+
+    if action.startswith("slides:"):
+        if job.get("stage") != "choosing_deck_slides":
+            await message.reply_text("أكمل الخطوة المطلوبة أولًا أو أرسل /cancel.")
+            return
+        job["slide_count"] = min(int(action.split(":")[1]), MAX_DECK_SLIDES)
+        job["stage"] = "waiting_deck_org"
+        await message.reply_text(
+            "أرسل اسم الجهة كما تريده على الغلاف، أو اضغط «بدون اسم».",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("بدون اسم", callback_data="deck:noorg")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                ]
+            ),
+        )
+        return
+
+    if action == "noorg":
+        if job.get("stage") != "waiting_deck_org":
+            await message.reply_text("أكمل الخطوة المطلوبة أولًا أو أرسل /cancel.")
+            return
+        await start_deck_outline(message, context, organisation="")
+        return
+
+    if action == "retry":
+        if job.get("stage") != "reviewing_deck_outline":
+            await message.reply_text("أكمل الخطوة المطلوبة أولًا أو أرسل /cancel.")
+            return
+        await start_deck_outline(message, context, job.get("organisation", ""))
+        return
+
+    if action == "approve":
+        if job.get("stage") != "reviewing_deck_outline":
+            await message.reply_text("أكمل الخطوة المطلوبة أولًا أو أرسل /cancel.")
+            return
+        job["stage"] = "rendering_deck"
+        await process_deck_render(message, context)
+        return
+
+
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     job = context.user_data.get("job")
@@ -960,9 +1112,20 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "excel_to_vcf": {".xlsx", ".xls"},
             "clean_excel": {".xlsx"},
             "split_excel": {".xlsx"},
+            "pptx_deck": {".pdf", ".docx"},
         }
         validate_attachment(meta, allowed_by_service.get(service_id, set()))
-        if service_id == "split_pdf":
+        if service_id == "pptx_deck":
+            if not gemini_key_present():
+                raise ServiceInputError(
+                    "خدمة العروض التقديمية غير مهيأة على الخادم. راجع مسؤول البوت."
+                )
+            job.update({"source": meta, "stage": "choosing_deck_slides"})
+            await message.reply_text(
+                "كم شريحة تريد في العرض؟",
+                reply_markup=deck_slides_keyboard(),
+            )
+        elif service_id == "split_pdf":
             job.update({"source": meta, "stage": "waiting_pages"})
             await message.reply_text("أرسل الصفحات المطلوبة، مثال: 1-3,5,8", reply_markup=job_keyboard())
         elif service_id == "manage_pdf_pages":
@@ -1141,6 +1304,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         and job["stage"] == "waiting_colornote_password"
     ):
         await process_colornote(message, context, raw_text)
+    elif job["service"] == "pptx_deck" and job["stage"] == "waiting_deck_org":
+        await start_deck_outline(message, context, organisation=text)
     else:
         await message.reply_text("أكمل الخطوة المطلوبة بالأزرار أو أرسل /cancel.")
 
@@ -1357,6 +1522,7 @@ def main() -> None:
     )
     app.add_handler(CallbackQueryHandler(on_excel_action, pattern=r"^excel:"))
     app.add_handler(CallbackQueryHandler(on_colornote_action, pattern=r"^colornote:"))
+    app.add_handler(CallbackQueryHandler(on_deck_action, pattern=r"^deck:"))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, on_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     logger.info("البوت يعمل الآن...")
