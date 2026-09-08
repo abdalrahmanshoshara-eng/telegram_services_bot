@@ -2,7 +2,7 @@ import bot
 
 
 def test_services_are_grouped_into_categories():
-    assert len(bot.SERVICES) == 19
+    assert len(bot.SERVICES) == 20
     category_ids = {category["id"] for category in bot.SERVICE_CATEGORIES}
     assert category_ids == {"platforms", "documents", "images", "data", "tools"}
     assert all(service["category"] in category_ids for service in bot.SERVICES)
@@ -10,7 +10,7 @@ def test_services_are_grouped_into_categories():
     assert len(bot.services_for_category("documents")) == 8
     assert len(bot.services_for_category("images")) == 3
     assert len(bot.services_for_category("data")) == 5
-    assert len(bot.services_for_category("tools")) == 1
+    assert len(bot.services_for_category("tools")) == 2
 
 
 def test_number_selection_is_local_to_the_chosen_category():

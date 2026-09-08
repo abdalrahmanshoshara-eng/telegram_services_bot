@@ -70,6 +70,12 @@ from services.pptx_deck import (
     render_outline,
 )
 from services.ocr_services import ocr_image
+from services.text_editor import (
+    MAX_INPUT_CHARS as TEXT_EDITOR_MAX_CHARS,
+    MAX_MESSAGE_CHARS as TEXT_EDITOR_MAX_MESSAGE_CHARS,
+    TextEditError,
+    polish_text,
+)
 from services.word_formatter import format_word_tables
 
 logging.basicConfig(
@@ -333,6 +339,13 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
     elif service_id == "create_qr":
         stage = "waiting_text"
         instruction = "أرسل الرابط أو النص الذي تريد تحويله إلى QR Code."
+    elif service_id == "text_editor":
+        stage = "waiting_text"
+        instruction = (
+            "أرسل النص العربي الآن كرسالة واحدة "
+            f"(حتى {TEXT_EDITOR_MAX_CHARS} حرف).\n"
+            "سأعيده مصححاً ومنسقاً دون تغيير المعنى."
+        )
     elif service_id == "excel_to_vcf":
         stage = "waiting_file"
         instruction = (
@@ -426,6 +439,7 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             ExcelToolsError,
             ColorNoteConversionError,
             DeckError,
+            TextEditError,
         ),
     ):
         await message.reply_text(str(error))
@@ -840,6 +854,36 @@ async def process_qr(message, context, data: str) -> None:
         await finish_success(message, context)
     except Exception as error:
         await _handle_processing_error(message, status, "create_qr", error)
+
+
+async def process_text_editor(message, context, text: str) -> None:
+    status = await message.reply_text("⏳ جارٍ تدقيق النص...")
+    try:
+        async with PROCESSING_SEMAPHORE:
+            result = await run_blocking(polish_text, text)
+
+        footer = ""
+        if result.notes:
+            footer = "\n\n📝 أهم التصحيحات:\n" + "\n".join(
+                f"• {note}" for note in result.notes
+            )
+
+        if len(result.text) <= TEXT_EDITOR_MAX_MESSAGE_CHARS:
+            await message.reply_text(f"✅ النص بعد التدقيق:\n\n{result.text}{footer}")
+        else:
+            # Too long for one Telegram message, so it goes out as a file.
+            with tempfile.TemporaryDirectory(prefix="telegram_text_editor_") as temp_dir:
+                output = Path(temp_dir) / "corrected_text.txt"
+                output.write_text(result.text, encoding="utf-8")
+                await send_result(
+                    message,
+                    output,
+                    f"✅ تم تدقيق النص.{footer}"[:1024],
+                )
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "text_editor", error)
 
 
 async def process_excel_contacts(message, context, country_code: str) -> None:
@@ -1265,6 +1309,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if job["service"] == "create_qr" and job["stage"] == "waiting_text":
         await process_qr(message, context, text)
+    elif job["service"] == "text_editor" and job["stage"] == "waiting_text":
+        await process_text_editor(message, context, raw_text)
     elif job["service"] == "split_pdf" and job["stage"] == "waiting_pages":
         await process_split(message, context, job, text)
     elif job["service"] == "watermark_pdf" and job["stage"] == "waiting_watermark_text":
