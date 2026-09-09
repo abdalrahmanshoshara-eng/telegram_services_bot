@@ -20,7 +20,7 @@ from .extract import ExtractedDoc
 
 # Stable Flash model: fast and cheap, and the deck is one call. For a more
 # capable outline set GEMINI_MODEL=gemini-3.1-pro-preview.
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 API_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 

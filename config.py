@@ -14,7 +14,7 @@ PROCESSING_TIMEOUT_SECONDS = max(
 OCR_LANG = os.environ.get("OCR_LANG", "ara+eng").strip() or "ara+eng"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash").strip()
 MAX_DECK_SLIDES = max(4, int(os.environ.get("MAX_DECK_SLIDES", "25")))
 
 SERVICE_CATEGORIES = [

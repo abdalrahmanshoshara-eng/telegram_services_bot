@@ -20,7 +20,7 @@ from typing import Any
 from google import genai
 from google.genai import errors, types
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 API_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
@@ -37,6 +37,13 @@ MAX_NOTES = 6
 # Gemini answers a demand spike with 503, which clears in seconds. Retrying
 # immediately just hits the same spike, so attempts are spaced out.
 RETRY_DELAYS = (1.5, 4.0)
+
+# Flash models reason before answering unless told not to, which costs several
+# seconds and a few hundred billed tokens per request. Proofreading against a
+# fixed schema at temperature 0 does not benefit from it: the rules are in the
+# system instruction and the shape of the answer is pinned. A budget of 0 is
+# accepted by both the 2.x and 3.x flash families, unlike thinking_level.
+THINKING_BUDGET = 0
 
 TATWEEL = "ـ"
 ARABIC_RANGE = "؀-ۿݐ-ݿ"
@@ -250,6 +257,7 @@ def _generate(client: genai.Client, prompt: str, model: str) -> str:
         response_json_schema=RESPONSE_SCHEMA,
         temperature=0.0,
         max_output_tokens=8000,
+        thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
     )
     try:
         resp = client.models.generate_content(model=model, contents=prompt, config=config)
