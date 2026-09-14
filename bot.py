@@ -76,6 +76,12 @@ from services.text_editor import (
     TextEditError,
     polish_text,
 )
+from services.voice_note import (
+    MAX_DURATION_SECONDS as VOICE_MAX_SECONDS,
+    SUPPORTED_SUFFIXES as VOICE_SUFFIXES,
+    VoiceNoteError,
+    voice_to_formal,
+)
 from services.word_formatter import format_word_tables
 
 logging.basicConfig(
@@ -191,6 +197,27 @@ def attachment_meta(message) -> dict | None:
             "name": message.document.file_name or "document",
             "size": message.document.file_size or 0,
             "suffix": Path(message.document.file_name or "").suffix.lower(),
+        }
+    if message.voice:
+        # A voice note carries no file_name, so the suffix the rest of the
+        # pipeline keys off has to be supplied here. Telegram sends Ogg/Opus.
+        return {
+            "kind": "voice",
+            "file_id": message.voice.file_id,
+            "name": "voice.oga",
+            "size": message.voice.file_size or 0,
+            "suffix": ".oga",
+            "duration": message.voice.duration or 0,
+        }
+    if message.audio:
+        name = message.audio.file_name or "audio.mp3"
+        return {
+            "kind": "audio",
+            "file_id": message.audio.file_id,
+            "name": name,
+            "size": message.audio.file_size or 0,
+            "suffix": Path(name).suffix.lower(),
+            "duration": message.audio.duration or 0,
         }
     if message.photo:
         photo = message.photo[-1]
@@ -346,6 +373,13 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
             f"(حتى {TEXT_EDITOR_MAX_CHARS} حرف).\n"
             "سأعيده مصححاً ومنسقاً دون تغيير المعنى."
         )
+    elif service_id == "voice_to_formal":
+        stage = "waiting_file"
+        instruction = (
+            "أرسل رسالة صوتية أو ملف صوتي الآن "
+            f"(حتى {VOICE_MAX_SECONDS // 60} دقائق).\n"
+            "سأنسخه حرفياً كما سُمع، ثم أحوّله إلى الفصحى."
+        )
     elif service_id == "excel_to_vcf":
         stage = "waiting_file"
         instruction = (
@@ -440,6 +474,7 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             ColorNoteConversionError,
             DeckError,
             TextEditError,
+            VoiceNoteError,
         ),
     ):
         await message.reply_text(str(error))
@@ -886,6 +921,54 @@ async def process_text_editor(message, context, text: str) -> None:
         await _handle_processing_error(message, status, "text_editor", error)
 
 
+def _voice_to_formal(source: Path, duration: int | None):
+    """`run_blocking` passes positional arguments only."""
+    return voice_to_formal(source, duration=duration)
+
+
+async def process_voice_note(message, context, meta: dict) -> None:
+    status = await message.reply_text("⏳ جارٍ تنزيل التسجيل...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_voice_note_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / f"voice{meta['suffix']}"
+            await download_meta(context, meta, source)
+            async with PROCESSING_SEMAPHORE:
+                await status.edit_text("⏳ جارٍ نسخ الصوت ثم تدقيقه...")
+                result = await run_blocking(
+                    _voice_to_formal, source, meta.get("duration")
+                )
+
+            footer = ""
+            if result.notes:
+                footer = "\n\n📝 أهم التصحيحات:\n" + "\n".join(
+                    f"• {note}" for note in result.notes
+                )
+            # The transcript is shown too: a mishearing comes back as fluent,
+            # correct Arabic, so the formal text alone would hide it.
+            body = (
+                f"🎙️ كما سُمع:\n{result.transcript}\n\n"
+                f"✅ بعد التحويل إلى الفصحى:\n{result.text}"
+            )
+            if len(body) + len(footer) <= TEXT_EDITOR_MAX_MESSAGE_CHARS:
+                await message.reply_text(f"{body}{footer}")
+            else:
+                # Too long for one Telegram message, so it goes out as a file.
+                output = root / "formal_text.txt"
+                output.write_text(
+                    f"النص كما سُمع:\n{result.transcript}\n\n"
+                    f"النص بعد التحويل إلى الفصحى:\n{result.text}\n",
+                    encoding="utf-8",
+                )
+                await send_result(
+                    message, output, f"✅ تم تحويل التسجيل.{footer}"[:1024]
+                )
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        await _handle_processing_error(message, status, "voice_to_formal", error)
+
+
 async def process_excel_contacts(message, context, country_code: str) -> None:
     job = context.user_data.get("job")
     if (
@@ -1157,8 +1240,12 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "clean_excel": {".xlsx"},
             "split_excel": {".xlsx"},
             "pptx_deck": {".pdf", ".docx"},
+            "voice_to_formal": set(VOICE_SUFFIXES),
         }
         validate_attachment(meta, allowed_by_service.get(service_id, set()))
+        if service_id == "voice_to_formal":
+            await process_voice_note(message, context, meta)
+            return
         if service_id == "pptx_deck":
             if not gemini_key_present():
                 raise ServiceInputError(
@@ -1569,7 +1656,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_excel_action, pattern=r"^excel:"))
     app.add_handler(CallbackQueryHandler(on_colornote_action, pattern=r"^colornote:"))
     app.add_handler(CallbackQueryHandler(on_deck_action, pattern=r"^deck:"))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, on_file))
+    app.add_handler(
+        MessageHandler(
+            filters.Document.ALL | filters.PHOTO | filters.VOICE | filters.AUDIO,
+            on_file,
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     logger.info("البوت يعمل الآن...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

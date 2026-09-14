@@ -57,6 +57,40 @@ class TextEditError(ValueError):
     """
 
 
+class QuotaExceededError(TextEditError):
+    """Raised when the provider quota is spent.
+
+    Separate from TextEditError because the retry loop must not spend three
+    attempts on it: the answer will be the same until the quota resets.
+    """
+
+
+def quota_message(error: Exception) -> str:
+    """Turn a 429 into something a user can act on.
+
+    The provider reports a daily cap and a short-term rate limit through the
+    same status code, and it attaches a retryDelay to both - which is
+    misleading for a daily cap, since that one waits for the next day.
+    """
+    text = str(error)
+    if "PerDay" in text:
+        return (
+            "انتهت حصة Gemini اليومية المجانية لهذا الموديل. انتظر إعادة "
+            "التعيين، أو فعّل الفوترة، أو غيّر GEMINI_MODEL إلى موديل آخر."
+        )
+    match = re.search(r"retry in ([\d.]+)s", text)
+    if match:
+        return (
+            "تجاوزت حصة Gemini المؤقتة. أعد المحاولة بعد "
+            f"{round(float(match.group(1)))} ثانية."
+        )
+    return "تجاوزت حصة Gemini المسموحة. أعد المحاولة لاحقاً."
+
+
+def _is_quota_error(error: Exception) -> bool:
+    return getattr(error, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(error)
+
+
 def api_key_present() -> bool:
     return any(os.environ.get(v) for v in API_KEY_VARS)
 
@@ -262,6 +296,8 @@ def _generate(client: genai.Client, prompt: str, model: str) -> str:
     try:
         resp = client.models.generate_content(model=model, contents=prompt, config=config)
     except errors.ClientError as e:
+        if _is_quota_error(e):
+            raise QuotaExceededError(quota_message(e)) from e
         raise TextEditError(f"طلب غير صالح إلى Gemini: {e}") from e
     except errors.ServerError as e:
         raise TextEditError(f"خدمة Gemini غير متاحة حالياً: {e}") from e
@@ -320,6 +356,9 @@ def polish_text(
             return _validate(json.loads(_generate(client, prompt, model)), source)
         except json.JSONDecodeError as e:
             last = e
+        except QuotaExceededError:
+            # Nothing to wait out inside one request; the cap is upstream.
+            raise
         except TextEditError as e:
             # A refusal or an over-long input will not fix itself on retry.
             if "تعذّر تدقيق" in str(e) or "طويل جداً" in str(e):
