@@ -165,6 +165,17 @@ SERVICES = [
         ),
     },
     {
+        "id": "voice_to_formal",
+        "category": "tools",
+        "kind": "direct",
+        "title": "تحويل تسجيل صوتي إلى نص فصيح",
+        "emoji": "🎙️",
+        "desc": (
+            "ينسخ التسجيل الصوتي حرفياً ثم يحوله إلى العربية الفصحى "
+            "مصححاً ومنسقاً، ويعرض النص كما سُمع لتتأكد من صحة النسخ."
+        ),
+    },
+    {
         "id": "ocr_image",
         "category": "images",
         "kind": "direct",
