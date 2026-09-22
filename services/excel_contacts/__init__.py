@@ -1,11 +1,13 @@
 """Excel-to-VCF conversion service adapted from the Professional Reports platform."""
 
+import os
 from pathlib import Path, PurePath
 
 from .domain import normalize_country_code
 from .processor import WorkbookValidationError, process_workbook
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+MAX_FILE_SIZE_MB = max(1, int(os.environ.get("MAX_EXCEL_CONTACTS_FILE_MB", "50")))
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOWED_EXTENSIONS = {".xlsx", ".xls"}
 XLSX_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 XLS_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
@@ -31,7 +33,9 @@ def convert_excel_contacts(
     if size == 0:
         raise ExcelContactsError("ملف Excel المرفوع فارغ.")
     if size > MAX_FILE_SIZE:
-        raise ExcelContactsError("حجم ملف Excel أكبر من الحد المسموح وهو 10 ميغابايت.")
+        raise ExcelContactsError(
+            f"حجم ملف Excel أكبر من الحد المسموح وهو {MAX_FILE_SIZE_MB} ميغابايت."
+        )
 
     data = source.read_bytes()
     valid_signature = (

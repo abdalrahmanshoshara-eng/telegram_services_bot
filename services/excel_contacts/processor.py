@@ -1,6 +1,7 @@
 """Bounded in-memory Excel parsing and result-archive generation."""
 
 import io
+import os
 import re
 import zipfile
 from datetime import UTC, datetime
@@ -22,9 +23,17 @@ from .domain import (
     safe_spreadsheet_value,
 )
 
-MAX_WORKSHEETS = 20
-MAX_ROWS = 10_000
-MAX_COLUMNS = 100
+MAX_WORKSHEETS = max(1, int(os.environ.get("MAX_EXCEL_CONTACTS_WORKSHEETS", "20")))
+MAX_ROWS = max(1, int(os.environ.get("MAX_EXCEL_CONTACTS_ROWS", "10000")))
+# Real-world worksheets -- especially files exported from Google Sheets/Forms --
+# very often report a huge `max_column`/`ncols` because formatting (borders,
+# fill, column width, ...) was applied to a wide tail of otherwise empty
+# columns. That declared dimension is not a trustworthy measure of how many
+# columns actually hold data, so this limit is enforced against genuinely
+# populated columns instead of the raw reported width (see
+# `_bounded_xlsx_rows` / `_bounded_xls_rows` below), which lets it stay
+# generous without reopening the resource-exhaustion risk it exists for.
+MAX_COLUMNS = max(100, int(os.environ.get("MAX_EXCEL_CONTACTS_COLUMNS", "5000")))
 MAX_XLSX_ARCHIVE_ENTRIES = 2_000
 MAX_XLSX_UNCOMPRESSED_SIZE = 100 * 1024 * 1024
 MAX_OUTPUT_SIZE = 25 * 1024 * 1024
@@ -71,6 +80,41 @@ def _has_expected_headers(row: list) -> bool:
     return all(column in headers for column in EXPECTED_COLUMNS)
 
 
+def _too_many_columns_error() -> WorkbookValidationError:
+    return WorkbookValidationError(
+        f"الحد الأعلى المدعوم هو {MAX_COLUMNS} عمود لكل ورقة."
+    )
+
+
+def _bounded_xlsx_rows(sheet, **kwargs):
+    """Yield each row's values, measuring width from real data rather than
+    the worksheet's declared (and frequently inflated) dimension.
+
+    At most MAX_COLUMNS + 1 columns are ever requested from openpyxl per
+    row, regardless of what `sheet.max_column` reports, so a worksheet whose
+    reported extent is inflated by stray formatting is neither wrongly
+    rejected nor expensive to read. If the extra probe column is ever
+    genuinely populated, the sheet really does exceed the configured limit.
+    """
+    scan_width = MAX_COLUMNS + 1
+    for row in sheet.iter_rows(
+        min_col=1, max_col=scan_width, values_only=True, **kwargs
+    ):
+        if len(row) > MAX_COLUMNS and not is_empty(row[MAX_COLUMNS]):
+            raise _too_many_columns_error()
+        yield row[:MAX_COLUMNS]
+
+
+def _bounded_xls_rows(sheet):
+    """Same real-data width measurement as `_bounded_xlsx_rows`, for legacy .xls."""
+    scan_width = MAX_COLUMNS + 1
+    for row_index in range(sheet.nrows):
+        row = sheet.row_values(row_index, 0, min(sheet.ncols, scan_width))
+        if len(row) > MAX_COLUMNS and not is_empty(row[MAX_COLUMNS]):
+            raise _too_many_columns_error()
+        yield row[:MAX_COLUMNS]
+
+
 def _read_xlsx(data: bytes) -> tuple[list[list], str]:
     _validate_xlsx_container(data)
     try:
@@ -88,15 +132,11 @@ def _read_xlsx(data: bytes) -> tuple[list[list], str]:
                 raise WorkbookValidationError(
                     f"الحد الأعلى المدعوم هو {MAX_ROWS:,} صف لكل ملف."
                 )
-            if sheet.max_column > MAX_COLUMNS:
-                raise WorkbookValidationError(
-                    f"الحد الأعلى المدعوم هو {MAX_COLUMNS} عمود لكل ورقة."
-                )
-            header = _first_non_empty_row(sheet.iter_rows(values_only=True))
+            header = _first_non_empty_row(_bounded_xlsx_rows(sheet))
             if header and fallback is None:
                 fallback = ([header], sheet.title)
             if _has_expected_headers(header):
-                matrix = _non_empty_matrix(sheet.iter_rows(values_only=True))
+                matrix = _non_empty_matrix(_bounded_xlsx_rows(sheet))
                 return matrix, sheet.title
         return fallback or ([], workbook.sheetnames[0])
     except WorkbookValidationError:
@@ -124,19 +164,11 @@ def _read_xls(data: bytes) -> tuple[list[list], str]:
                 raise WorkbookValidationError(
                     f"الحد الأعلى المدعوم هو {MAX_ROWS:,} صف لكل ملف."
                 )
-            if sheet.ncols > MAX_COLUMNS:
-                raise WorkbookValidationError(
-                    f"الحد الأعلى المدعوم هو {MAX_COLUMNS} عمود لكل ورقة."
-                )
-            header = _first_non_empty_row(
-                sheet.row_values(index) for index in range(sheet.nrows)
-            )
+            header = _first_non_empty_row(_bounded_xls_rows(sheet))
             if header and fallback is None:
                 fallback = ([header], sheet.name)
             if _has_expected_headers(header):
-                matrix = _non_empty_matrix(
-                    sheet.row_values(index) for index in range(sheet.nrows)
-                )
+                matrix = _non_empty_matrix(_bounded_xls_rows(sheet))
                 return matrix, sheet.name
         return fallback or ([], workbook.sheet_names()[0])
     except WorkbookValidationError:
