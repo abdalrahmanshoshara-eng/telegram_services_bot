@@ -15,6 +15,7 @@ from .domain import (
     DUPLICATE_COLUMNS,
     EXPECTED_COLUMNS,
     INVALID_COLUMNS,
+    REQUIRED_COLUMNS,
     VALID_COLUMNS,
     create_vcard,
     is_empty,
@@ -73,11 +74,20 @@ def _first_non_empty_row(rows) -> list:
     return []
 
 
-def _has_expected_headers(row: list) -> bool:
+def _header_match_rank(row: list) -> int:
+    """How well a header row matches the contact schema.
+
+    2 -- every expected column is present, 1 -- only the required ones
+    (name + phone) are, 0 -- this is not a contacts sheet. A sheet that carries
+    the optional columns too is preferred when a workbook holds several
+    candidate sheets.
+    """
     if not row:
-        return False
+        return 0
     headers = {normalize_header(value) for value in row}
-    return all(column in headers for column in EXPECTED_COLUMNS)
+    if not all(column in headers for column in REQUIRED_COLUMNS):
+        return 0
+    return 2 if all(column in headers for column in EXPECTED_COLUMNS) else 1
 
 
 def _too_many_columns_error() -> WorkbookValidationError:
@@ -126,6 +136,7 @@ def _read_xlsx(data: bytes) -> tuple[list[list], str]:
         if not workbook.sheetnames:
             raise WorkbookValidationError("ملف Excel لا يحتوي على أوراق عمل.")
         fallback = None
+        partial_match = None
         for sheet_name in workbook.sheetnames:
             sheet = workbook[sheet_name]
             if sheet.max_row > MAX_ROWS + 1:
@@ -135,9 +146,15 @@ def _read_xlsx(data: bytes) -> tuple[list[list], str]:
             header = _first_non_empty_row(_bounded_xlsx_rows(sheet))
             if header and fallback is None:
                 fallback = ([header], sheet.title)
-            if _has_expected_headers(header):
+            rank = _header_match_rank(header)
+            if rank == 2:
                 matrix = _non_empty_matrix(_bounded_xlsx_rows(sheet))
                 return matrix, sheet.title
+            if rank == 1 and partial_match is None:
+                partial_match = sheet.title
+        if partial_match is not None:
+            sheet = workbook[partial_match]
+            return _non_empty_matrix(_bounded_xlsx_rows(sheet)), sheet.title
         return fallback or ([], workbook.sheetnames[0])
     except WorkbookValidationError:
         raise
@@ -158,6 +175,7 @@ def _read_xls(data: bytes) -> tuple[list[list], str]:
         if workbook.nsheets == 0:
             raise WorkbookValidationError("ملف Excel لا يحتوي على أوراق عمل.")
         fallback = None
+        partial_match = None
         for sheet_index in range(workbook.nsheets):
             sheet = workbook.sheet_by_index(sheet_index)
             if sheet.nrows > MAX_ROWS + 1:
@@ -167,9 +185,15 @@ def _read_xls(data: bytes) -> tuple[list[list], str]:
             header = _first_non_empty_row(_bounded_xls_rows(sheet))
             if header and fallback is None:
                 fallback = ([header], sheet.name)
-            if _has_expected_headers(header):
+            rank = _header_match_rank(header)
+            if rank == 2:
                 matrix = _non_empty_matrix(_bounded_xls_rows(sheet))
                 return matrix, sheet.name
+            if rank == 1 and partial_match is None:
+                partial_match = sheet_index
+        if partial_match is not None:
+            sheet = workbook.sheet_by_index(partial_match)
+            return _non_empty_matrix(_bounded_xls_rows(sheet)), sheet.name
         return fallback or ([], workbook.sheet_names()[0])
     except WorkbookValidationError:
         raise
@@ -184,12 +208,15 @@ def _extract_rows(matrix: list[list]) -> list[dict]:
     if not matrix:
         raise WorkbookValidationError("ورقة العمل الأولى فارغة.")
     headers = [normalize_header(value) for value in matrix[0]]
-    missing = [column for column in EXPECTED_COLUMNS if column not in headers]
+    missing = [column for column in REQUIRED_COLUMNS if column not in headers]
     if missing:
         raise WorkbookValidationError(
             f"الأعمدة المطلوبة غير موجودة: {'، '.join(missing)}."
         )
     index_by_header = {header: index for index, header in enumerate(headers)}
+    # Optional columns the workbook does not carry simply read back as empty,
+    # so a file with just a name and a phone number converts normally.
+    present = [column for column in EXPECTED_COLUMNS if column in index_by_header]
     return [
         {
             column: (
@@ -197,7 +224,7 @@ def _extract_rows(matrix: list[list]) -> list[dict]:
                 if index_by_header[column] < len(cells)
                 else ""
             )
-            for column in EXPECTED_COLUMNS
+            for column in present
         }
         for cells in matrix[1:]
     ]

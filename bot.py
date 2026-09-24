@@ -383,8 +383,9 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
     elif service_id == "excel_to_vcf":
         stage = "waiting_file"
         instruction = (
-            "أرسل ملف XLSX أو XLS الآن. يجب أن يحتوي الصف الأول على الأعمدة:\n"
-            "الاسم الكامل | رقم التواصل | البريد الالكتروني"
+            "أرسل ملف XLSX أو XLS الآن. يجب أن يحتوي الصف الأول على العمودين:\n"
+            "الاسم الكامل | رقم التواصل\n"
+            "وعمود البريد الالكتروني اختياري، يُستخدم إذا كان موجوداً."
         )
     elif service_id in {"clean_excel", "split_excel"}:
         stage = "waiting_file"

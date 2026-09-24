@@ -131,3 +131,49 @@ def test_fake_excel_file_is_rejected(tmp_path):
 
     with pytest.raises(ExcelContactsError, match="لا يطابق صيغة Excel"):
         convert_excel_contacts(source, tmp_path / "output.zip", "963")
+
+
+def make_xlsx_without_email(path, rows):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "جهات الاتصال"
+    sheet.append(["الاسم الكامل", "رقم التواصل"])
+    for row in rows:
+        sheet.append(row)
+    workbook.save(path)
+    workbook.close()
+
+
+def test_workbook_without_email_column_is_converted(tmp_path):
+    source = tmp_path / "contacts.xlsx"
+    destination = tmp_path / "contacts-output.zip"
+    make_xlsx_without_email(
+        source, [["أحمد", "0999123456"], ["ليلى", "0944123456"]]
+    )
+
+    summary = convert_excel_contacts(source, destination, "963")
+
+    assert summary == {
+        "totalRows": 2,
+        "validCount": 2,
+        "duplicateCount": 0,
+        "invalidCount": 0,
+    }
+    with zipfile.ZipFile(destination) as archive:
+        vcard = archive.read("contacts.vcf").decode("utf-8")
+        assert "TEL;TYPE=CELL:+963999123456" in vcard
+        assert "TEL;TYPE=CELL:+963944123456" in vcard
+        assert "EMAIL" not in vcard
+
+
+def test_missing_name_column_is_still_rejected(tmp_path):
+    source = tmp_path / "contacts.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["رقم التواصل"])
+    sheet.append(["0999123456"])
+    workbook.save(source)
+    workbook.close()
+
+    with pytest.raises(ExcelContactsError, match="الاسم الكامل"):
+        convert_excel_contacts(source, tmp_path / "output.zip", "963")

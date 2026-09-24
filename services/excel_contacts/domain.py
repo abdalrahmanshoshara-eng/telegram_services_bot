@@ -7,7 +7,12 @@ import unicodedata
 FULL_NAME = "الاسم الكامل"
 PHONE = "رقم التواصل"
 EMAIL = "البريد الالكتروني"
-EXPECTED_COLUMNS = [FULL_NAME, PHONE, EMAIL]
+# Only the name and the phone number are needed to build a contact; every other
+# column is used when the workbook happens to carry it and silently skipped when
+# it does not.
+REQUIRED_COLUMNS = [FULL_NAME, PHONE]
+OPTIONAL_COLUMNS = [EMAIL]
+EXPECTED_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
 VALID_COLUMNS = EXPECTED_COLUMNS
 DUPLICATE_COLUMNS = [
