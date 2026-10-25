@@ -31,5 +31,50 @@ services:
         max-size: 10m
         max-file: "3"
 
+  # Web page for the same services (tools/services_ui.py), from the same image.
+  # It has no login, so it is published on the host's loopback only by default;
+  # set UI_BIND=0.0.0.0 in .env only behind a VPN or an authenticating proxy.
+  services-ui:
+    image: telegram-services-bot:latest
+    container_name: telegram-services-ui
+    depends_on:
+      - telegram-services-bot
+    restart: unless-stopped
+    init: true
+    command: ["python", "tools/services_ui.py", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-8765}:8765"
+    env_file:
+      - .env
+    environment:
+      REMBG_HOME: /data/rembg
+      U2NET_HOME: /data/rembg
+      TMPDIR: /tmp
+      NUMBA_CACHE_DIR: /tmp/numba
+      XDG_CACHE_HOME: /tmp/cache
+    volumes:
+      # The bot downloads the background-removal model; the page only reads it.
+      - rembg-models:/data/rembg:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    mem_limit: ${UI_MEMORY_LIMIT:-2g}
+    cpus: ${UI_CPU_LIMIT:-1.0}
+    security_opt:
+      - no-new-privileges:true
+    # The image's healthcheck looks for bot.py; this container serves HTTP instead.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 volumes:
   rembg-models:

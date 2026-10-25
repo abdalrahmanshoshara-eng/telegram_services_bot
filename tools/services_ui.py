@@ -19,8 +19,9 @@ tools/services_ui_assets/.
     python tools/services_ui.py             # http://127.0.0.1:8000
     python tools/services_ui.py --port 9000
 
-Development only: it binds to localhost, has no authentication, and is not
-part of the container image.
+docker-compose.yml also runs it as the `services-ui` service, published on the
+host's 127.0.0.1:8765 by default. It has no authentication: keep it on
+loopback, or behind a VPN or an authenticating proxy.
 """
 
 from __future__ import annotations

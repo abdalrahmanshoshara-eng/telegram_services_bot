@@ -10,5 +10,5 @@ else
     echo "WARNING: background-removal model preparation failed; starting the bot without it" >&2
     echo "Other services will remain available. Check the container logs before using background removal." >&2
 fi
-echo "Starting Telegram services bot"
+echo "Starting: $*"
 exec "$@"
