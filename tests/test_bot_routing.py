@@ -2,14 +2,14 @@ import bot
 
 
 def test_services_are_grouped_into_categories():
-    assert len(bot.SERVICES) == 21
+    assert len(bot.SERVICES) == 22
     category_ids = {category["id"] for category in bot.SERVICE_CATEGORIES}
     assert category_ids == {"platforms", "documents", "images", "data", "tools"}
     assert all(service["category"] in category_ids for service in bot.SERVICES)
     assert len(bot.services_for_category("platforms")) == 2
     assert len(bot.services_for_category("documents")) == 8
     assert len(bot.services_for_category("images")) == 3
-    assert len(bot.services_for_category("data")) == 5
+    assert len(bot.services_for_category("data")) == 6
     assert len(bot.services_for_category("tools")) == 3
 
 
@@ -20,7 +20,8 @@ def test_number_selection_is_local_to_the_chosen_category():
     assert bot.service_by_category_number("data", 2)["id"] == "clean_excel"
     assert bot.service_by_category_number("data", 4)["id"] == "merge_excel"
     assert bot.service_by_category_number("data", 5)["id"] == "colornote_to_html"
-    assert bot.service_by_category_number("data", 6) is None
+    assert bot.service_by_category_number("data", 6)["id"] == "word_to_excel"
+    assert bot.service_by_category_number("data", 7) is None
 
 
 def test_initial_screen_contains_categories_not_services():
