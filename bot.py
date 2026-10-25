@@ -83,6 +83,7 @@ from services.voice_note import (
     voice_to_formal,
 )
 from services.word_formatter import format_word_tables
+from services.word_to_excel import WordToExcelError, word_files_to_excel
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -346,6 +347,7 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
         "images_to_pdf",
         "colornote_to_html",
         "merge_excel",
+        "word_to_excel",
     }:
         stage = "collecting"
         if service_id == "colornote_to_html":
@@ -357,6 +359,11 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
             instruction = (
                 "أرسل ملفات XLSX واحدًا تلو الآخر، ثم اضغط «انتهيت» "
                 "لاختيار طريقة الدمج."
+            )
+        elif service_id == "word_to_excel":
+            instruction = (
+                "أرسل ملفات Word بصيغة DOCX واحدًا تلو الآخر، ثم اضغط «انتهيت».\n"
+                "سيكون كل ملف صفًا في Excel حسب ترتيب الإرسال."
             )
         else:
             instruction = (
@@ -476,6 +483,7 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             DeckError,
             TextEditError,
             VoiceNoteError,
+            WordToExcelError,
         ),
     ):
         await message.reply_text(str(error))
@@ -551,6 +559,8 @@ async def collect_file(message, context, job: dict, meta: dict) -> None:
             allowed = {".pdf"}
         elif service_id == "merge_excel":
             allowed = {".xlsx"}
+        elif service_id == "word_to_excel":
+            allowed = {".docx"}
         else:
             allowed = IMAGE_EXTENSIONS
         validate_attachment(meta, allowed)
@@ -641,6 +651,27 @@ async def finish_collection(message, context: ContextTypes.DEFAULT_TYPE) -> None
                     await status.edit_text("⏳ جارٍ دمج ملفات PDF...")
                     await run_blocking(merge_pdfs, sources, output)
                     caption = f"✅ تم دمج {len(sources)} ملفات PDF."
+                elif job["service"] == "word_to_excel":
+                    output = root / "word_contents.xlsx"
+                    await status.edit_text("⏳ جارٍ استخراج محتوى ملفات Word...")
+                    named_sources = [
+                        (meta["name"], source)
+                        for meta, source in zip(job["files"], sources)
+                    ]
+                    summary = await run_blocking(
+                        word_files_to_excel, named_sources, output
+                    )
+                    caption = (
+                        f"✅ تم جمع محتوى {summary['files']} ملفات Word في Excel.\n"
+                        f"عدد الأحرف: {summary['characters']:,}"
+                    )
+                    if summary["empty"]:
+                        caption += f"\nملفات بلا نص: {summary['empty']}"
+                    if summary["split"]:
+                        caption += (
+                            "\nملفات تجاوزت سعة خلية Excel وأُكملت في الأعمدة "
+                            f"التالية: {summary['split']}"
+                        )
                 else:
                     output = root / "images.pdf"
                     await status.edit_text("⏳ جارٍ تحويل الصور إلى PDF...")
