@@ -25,6 +25,27 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+# Office to PDF: LibreOffice (Writer, Calc, Impress) and free fonts that stand
+# in for the Microsoft and Arabic fonts Office files use (see
+# services/office_to_pdf/fonts.conf). A separate layer, so changing it does
+# not reinstall the Python packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer-nogui \
+    libreoffice-calc-nogui \
+    libreoffice-impress-nogui \
+    fonts-noto-core \
+    fonts-noto-ui-core \
+    fonts-hosny-amiri \
+    fonts-kacst \
+    fonts-kacst-one \
+    fonts-liberation2 \
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    && rm -rf /var/lib/apt/lists/*
+COPY services/office_to_pdf/fonts.conf /etc/fonts/local.conf
+COPY assets/syid/fonts/ /usr/local/share/fonts/syid/
+RUN fc-cache -f
+
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin botuser \
     && mkdir -p /data/rembg \
     && chown -R botuser:botuser /data

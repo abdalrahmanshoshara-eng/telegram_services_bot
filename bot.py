@@ -32,6 +32,7 @@ from config import (
 )
 from services.file_services import (
     ServiceInputError,
+    compress_pdf,
     create_qr_code,
     extract_pdf_pages,
     images_to_pdf,
@@ -48,9 +49,11 @@ from services.colornote import (
     convert_colornote_backups,
 )
 from services.excel_contacts import (
+    ALLOWED_EXTENSIONS as EXCEL_CONTACTS_EXTENSIONS,
     MAX_FILE_SIZE as EXCEL_CONTACTS_MAX_FILE_SIZE,
+    MAX_FILE_SIZE_MB as EXCEL_CONTACTS_MAX_FILE_MB,
     ExcelContactsError,
-    convert_excel_contacts,
+    convert_contacts_files,
 )
 from services.excel_tools import (
     ExcelToolsError,
@@ -83,6 +86,12 @@ from services.voice_note import (
     voice_to_formal,
 )
 from services.word_formatter import format_word_tables
+from services.office_to_pdf import (
+    LEGACY as OFFICE_LEGACY_SUFFIXES,
+    SUPPORTED_SUFFIXES as OFFICE_SUFFIXES,
+    OfficeToPdfError,
+    office_to_pdf,
+)
 from services.word_to_excel import WordToExcelError, word_files_to_excel
 
 logging.basicConfig(
@@ -348,9 +357,26 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
         "colornote_to_html",
         "merge_excel",
         "word_to_excel",
+        "excel_to_vcf",
     }:
         stage = "collecting"
-        if service_id == "colornote_to_html":
+        if service_id == "excel_to_vcf":
+            instruction = (
+                "أرسل ملف جهات اتصال واحدًا أو عدة ملفات واحدًا تلو الآخر، "
+                "ثم اضغط «انتهيت».\n"
+                "الصيغ: XLSX أو XLS أو CSV أو TXT أو VCF أو DOCX أو PDF، "
+                "ويمكن الخلط بينها.\n\n"
+                "• Excel: يجب أن يحتوي صف العناوين على العمودين: "
+                "الاسم الكامل | رقم التواصل، والبريد الالكتروني اختياري.\n"
+                "• CSV والجداول في Word وPDF: تُقبل عناوين عربية أو إنجليزية، "
+                "مثل الاسم والهاتف وName وPhone، وملفات تصدير Google وOutlook.\n"
+                "• النص الحر في TXT وWord وPDF: اسم ورقم في كل سطر، مثل: "
+                "أحمد علي 0933123456\n"
+                "• VCF: جهات اتصال مصدّرة من الهاتف.\n\n"
+                "تُدمج الملفات في قائمة واحدة، والجهات التي تشترك برقم تصبح جهة "
+                "واحدة تحمل كل أرقامها."
+            )
+        elif service_id == "colornote_to_html":
             instruction = (
                 "أرسل ملف Backup واحدًا أو عدة ملفات واحدًا تلو الآخر، "
                 "ثم اضغط «انتهيت»."
@@ -387,12 +413,14 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
             f"(حتى {VOICE_MAX_SECONDS // 60} دقائق).\n"
             "سأنسخه حرفياً كما سُمع، ثم أحوّله إلى الفصحى."
         )
-    elif service_id == "excel_to_vcf":
+    elif service_id == "compress_pdf":
+        stage = "waiting_file"
+        instruction = "أرسل ملف PDF الآن، ثم اختر مستوى الضغط."
+    elif service_id == "office_to_pdf":
         stage = "waiting_file"
         instruction = (
-            "أرسل ملف XLSX أو XLS الآن. يجب أن يحتوي الصف الأول على العمودين:\n"
-            "الاسم الكامل | رقم التواصل\n"
-            "وعمود البريد الالكتروني اختياري، يُستخدم إذا كان موجوداً."
+            "أرسل ملف Word أو Excel أو PowerPoint الآن، بصيغة DOCX أو XLSX أو PPTX.\n"
+            "الصيغ القديمة DOC وXLS وPPT غير مدعومة؛ احفظها بالصيغة الحديثة أولًا."
         )
     elif service_id in {"clean_excel", "split_excel"}:
         stage = "waiting_file"
@@ -418,6 +446,7 @@ async def present_service(message, service, context: ContextTypes.DEFAULT_TYPE) 
                         callback_data="excel:template",
                     )
                 ],
+                [InlineKeyboardButton("✅ انتهيت - تنفيذ", callback_data="job:done")],
                 [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
             ]
         )
@@ -484,6 +513,7 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             TextEditError,
             VoiceNoteError,
             WordToExcelError,
+            OfficeToPdfError,
         ),
     ):
         await message.reply_text(str(error))
@@ -497,6 +527,55 @@ async def _handle_processing_error(message, status, service_id: str, error: Exce
             await status.delete()
         except Exception:
             pass
+
+
+def pdf_name_for(filename: str) -> str:
+    """The uploaded file's name without its extension, safe as a file name."""
+    stem = Path(filename or "").stem
+    stem = "".join(ch for ch in stem if ch not in '<>:"/\\|?*' and ord(ch) >= 32).strip(" .")
+    return stem[:120] or "document"
+
+
+async def process_office_to_pdf(message, context, meta: dict, sheet_layout: str = "print") -> None:
+    status = await message.reply_text("⏳ جارٍ تنزيل الملف...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_office_pdf_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / f"input{meta['suffix']}"
+            output = root / f"{pdf_name_for(meta['name'])}.pdf"
+            await download_meta(context, meta, source)
+            async with PROCESSING_SEMAPHORE:
+                await status.edit_text("⏳ جارٍ التحويل إلى PDF...")
+                result = await run_blocking(
+                    office_to_pdf, source, output, meta["suffix"], sheet_layout
+                )
+            await send_result(
+                message, output, f"✅ تم التحويل إلى PDF ({result['pages']} صفحة)."
+            )
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        job = context.user_data.get("job")
+        if job and job.get("service") == "office_to_pdf" and meta["suffix"] == ".xlsx":
+            job["stage"] = "choosing_sheet_layout"  # let the user try the other layout
+        await _handle_processing_error(message, status, "office_to_pdf", error)
+
+
+async def on_office_pdf_option(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    job = context.user_data.get("job")
+    layout = query.data.split(":", 1)[1]
+    if (
+        not job
+        or job.get("service") != "office_to_pdf"
+        or job.get("stage") != "choosing_sheet_layout"
+        or "source" not in job
+    ):
+        await query.message.reply_text("ابدأ خدمة التحويل إلى PDF من القائمة أولًا.")
+        return
+    job["stage"] = "processing"
+    await process_office_to_pdf(query.message, context, job["source"], layout)
 
 
 async def process_single_file(message, context, job: dict, meta: dict) -> None:
@@ -561,9 +640,16 @@ async def collect_file(message, context, job: dict, meta: dict) -> None:
             allowed = {".xlsx"}
         elif service_id == "word_to_excel":
             allowed = {".docx"}
+        elif service_id == "excel_to_vcf":
+            allowed = set(EXCEL_CONTACTS_EXTENSIONS)
         else:
             allowed = IMAGE_EXTENSIONS
         validate_attachment(meta, allowed)
+        if service_id == "excel_to_vcf" and meta["size"] > EXCEL_CONTACTS_MAX_FILE_SIZE:
+            raise ServiceInputError(
+                "حجم الملف أكبر من الحد المسموح وهو "
+                f"{EXCEL_CONTACTS_MAX_FILE_MB} ميغابايت."
+            )
         file_limit = MAX_MULTI_FILES
     if len(job["files"]) >= file_limit:
         raise ServiceInputError(f"الحد الأقصى {file_limit} ملفات لكل عملية.")
@@ -588,6 +674,26 @@ async def finish_collection(message, context: ContextTypes.DEFAULT_TYPE) -> None
     minimum = 2 if job["service"] in {"merge_pdf", "merge_excel"} else 1
     if len(job["files"]) < minimum:
         await message.reply_text(f"أرسل {minimum} ملف/ملفات على الأقل قبل التنفيذ.")
+        return
+
+    if job["service"] == "excel_to_vcf":
+        job["stage"] = "waiting_country_code"
+        await message.reply_text(
+            f"تم استلام {len(job['files'])} ملف/ملفات.\n"
+            "أرسل رمز الدولة للأرقام المحلية من 1 إلى 4 أرقام، مثال: 963 لسوريا.\n"
+            "الأرقام المكتوبة بصيغة دولية لن تتغير.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🇸🇾 استخدام رمز سوريا 963",
+                            callback_data="excel:country:963",
+                        )
+                    ],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                ]
+            ),
+        )
         return
 
     if job["service"] == "colornote_to_html":
@@ -885,6 +991,62 @@ async def process_image_option(message, context, operation: str) -> None:
         await _handle_processing_error(message, status, job["service"], error)
 
 
+def _size_text(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} ميغابايت"
+    return f"{max(1, round(size / 1024))} كيلوبايت"
+
+
+async def process_pdf_compress(message, context, level: str) -> None:
+    job = context.user_data.get("job")
+    if (
+        not job
+        or job.get("service") != "compress_pdf"
+        or job.get("stage") != "choosing_pdf_compression"
+        or "source" not in job
+    ):
+        await message.reply_text("ابدأ خدمة ضغط PDF من القائمة أولًا.")
+        return
+    job["stage"] = "processing"
+    status = await message.reply_text("⏳ جارٍ ضغط ملف PDF...")
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_pdf_compress_") as temp_dir:
+            root = Path(temp_dir)
+            source = root / "input.pdf"
+            output = root / "compressed.pdf"
+            await download_meta(context, job["source"], source)
+            async with PROCESSING_SEMAPHORE:
+                result = await run_blocking(compress_pdf, source, output, level)
+            if result["reduced"]:
+                saved = round((1 - result["after"] / result["before"]) * 100)
+                caption = (
+                    "✅ تم ضغط الملف.\n"
+                    f"من {_size_text(result['before'])} إلى "
+                    f"{_size_text(result['after'])} (توفير {saved}٪)."
+                )
+                if result["images"]:
+                    caption += f"\nالصور المضغوطة: {result['images']}"
+            else:
+                caption = (
+                    "ℹ️ الملف مضغوط أصلًا ولم يكن بالإمكان تصغيره أكثر "
+                    "بهذا المستوى، فأعدته كما هو."
+                )
+                if level != "strong":
+                    caption += " جرّب مستوى «قوي» إن كان فيه صور."
+            await send_result(message, output, caption)
+        await status.delete()
+        await finish_success(message, context)
+    except Exception as error:
+        job["stage"] = "choosing_pdf_compression"
+        await _handle_processing_error(message, status, "compress_pdf", error)
+
+
+async def on_pdf_compress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await process_pdf_compress(query.message, context, query.data.split(":", 1)[1])
+
+
 async def process_watermark(message, context, text: str | None = None, logo_meta: dict | None = None) -> None:
     job = context.user_data.get("job")
     if not job or job.get("service") != "watermark_pdf" or "source" not in job:
@@ -1007,38 +1169,44 @@ async def process_excel_contacts(message, context, country_code: str) -> None:
         not job
         or job.get("service") != "excel_to_vcf"
         or job.get("stage") != "waiting_country_code"
-        or "source" not in job
+        or not job.get("files")
     ):
-        await message.reply_text("ابدأ خدمة تحويل Excel إلى VCF من القائمة أولًا.")
+        await message.reply_text("ابدأ خدمة تحويل جهات الاتصال إلى VCF من القائمة أولًا.")
         return
 
-    status = await message.reply_text("⏳ جارٍ تنزيل ملف Excel...")
+    status = await message.reply_text("⏳ جارٍ تنزيل ملفات جهات الاتصال...")
     try:
         with tempfile.TemporaryDirectory(prefix="telegram_excel_contacts_") as temp_dir:
             root = Path(temp_dir)
-            meta = job["source"]
-            source = root / f"input{meta['suffix']}"
+            sources = []
+            for index, meta in enumerate(job["files"], start=1):
+                target = root / f"input_{index:02d}{meta['suffix']}"
+                await download_meta(context, meta, target)
+                sources.append((meta["name"], target))
             timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
             output = root / f"contacts-output-{timestamp}.zip"
             vcf_output = root / "contacts.vcf"
-            await download_meta(context, meta, source)
             async with PROCESSING_SEMAPHORE:
-                await status.edit_text("⏳ جارٍ تنظيف جهات الاتصال وإنشاء ملف VCF...")
+                await status.edit_text("⏳ جارٍ تنظيف جهات الاتصال ودمجها وإنشاء ملف VCF...")
                 summary = await run_blocking(
-                    convert_excel_contacts,
-                    source,
+                    convert_contacts_files,
+                    sources,
                     output,
                     country_code,
-                    meta["name"],
                     vcf_output,
                 )
+            files_line = (
+                f"الملفات المدموجة: {summary['files']}\n" if summary["files"] > 1 else ""
+            )
             caption = (
                 "✅ اكتمل تحويل جهات الاتصال.\n"
-                f"الإجمالي: {summary['totalRows']} | "
-                f"المقبولة: {summary['validCount']} | "
-                f"المكررة: {summary['duplicateCount']} | "
+                f"{files_line}"
+                f"السجلات: {summary['totalRows']} | "
+                f"الجهات الفريدة: {summary['validCount']} | "
+                f"المكررة المدمجة: {summary['duplicateCount']} | "
                 f"تحتاج مراجعة: {summary['invalidCount']}\n"
-                "تحتوي الحزمة على contacts.vcf وتقارير Excel والتقرير الملخص."
+                "تحتوي الحزمة على contacts.vcf، وgoogle_contacts.csv للاستيراد في "
+                "Google Contacts، وملف Excel منظم، وتقارير المراجعة."
             )
             await send_result(
                 message,
@@ -1268,13 +1436,38 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "optimize_image": IMAGE_EXTENSIONS,
             "watermark_pdf": {".pdf"},
             "ocr_image": IMAGE_EXTENSIONS,
-            "excel_to_vcf": {".xlsx", ".xls"},
+            "compress_pdf": {".pdf"},
+            "office_to_pdf": set(OFFICE_SUFFIXES),
             "clean_excel": {".xlsx"},
             "split_excel": {".xlsx"},
             "pptx_deck": {".pdf", ".docx"},
             "voice_to_formal": set(VOICE_SUFFIXES),
         }
+        if service_id == "office_to_pdf" and meta["suffix"] in OFFICE_LEGACY_SUFFIXES:
+            raise ServiceInputError(
+                f"صيغة {meta['suffix'].lstrip('.').upper()} القديمة غير مدعومة. احفظ الملف "
+                f"بصيغة {OFFICE_LEGACY_SUFFIXES[meta['suffix']]} من Office ثم أرسله."
+            )
         validate_attachment(meta, allowed_by_service.get(service_id, set()))
+        if service_id == "office_to_pdf":
+            if meta["suffix"] != ".xlsx":
+                await process_office_to_pdf(message, context, meta)
+                return
+            job.update({"source": meta, "stage": "choosing_sheet_layout"})
+            await message.reply_text(
+                "كيف تريد صفحات Excel؟\n"
+                "• حسب إعدادات الطباعة: كما لو طبعت الملف من Excel.\n"
+                "• كل ورقة في صفحة: يمنع تقطيع الجداول العريضة، ومناسب للعرض على "
+                "الشاشة. الورقة الطويلة جدًا تصبح صفحة طويلة لا تصلح للطباعة.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("🖨️ حسب إعدادات الطباعة", callback_data="officepdf:print")],
+                        [InlineKeyboardButton("📄 كل ورقة في صفحة واحدة", callback_data="officepdf:fit")],
+                        [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
+                    ]
+                ),
+            )
+            return
         if service_id == "voice_to_formal":
             await process_voice_note(message, context, meta)
             return
@@ -1367,23 +1560,18 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ]
                 ),
             )
-        elif service_id == "excel_to_vcf":
-            if meta["size"] > EXCEL_CONTACTS_MAX_FILE_SIZE:
-                raise ServiceInputError(
-                    "حجم ملف Excel أكبر من الحد المسموح وهو 10 ميغابايت."
-                )
-            job.update({"source": meta, "stage": "waiting_country_code"})
+        elif service_id == "compress_pdf":
+            job.update({"source": meta, "stage": "choosing_pdf_compression"})
             await message.reply_text(
-                "أرسل رمز الدولة للأرقام المحلية من 1 إلى 4 أرقام، مثال: 963 لسوريا.\n"
-                "الأرقام المكتوبة بصيغة دولية لن تتغير.",
+                "اختر مستوى الضغط:\n"
+                "• بدون فقدان جودة: لا يغيّر الصور، وفائدته أكبر في ملفات النصوص.\n"
+                "• متوسط: يصغّر الصور الكبيرة بجودة مناسبة للقراءة والطباعة.\n"
+                "• قوي: أصغر حجم ممكن، للمشاركة والإرسال.",
                 reply_markup=InlineKeyboardMarkup(
                     [
-                        [
-                            InlineKeyboardButton(
-                                "🇸🇾 استخدام رمز سوريا 963",
-                                callback_data="excel:country:963",
-                            )
-                        ],
+                        [InlineKeyboardButton("🪶 بدون فقدان جودة", callback_data="pdfcompress:lossless")],
+                        [InlineKeyboardButton("⚖️ متوسط (مستحسن)", callback_data="pdfcompress:medium")],
+                        [InlineKeyboardButton("🗜️ قوي", callback_data="pdfcompress:strong")],
                         [InlineKeyboardButton("❌ إلغاء", callback_data="job:cancel")],
                     ]
                 ),
@@ -1688,6 +1876,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_excel_action, pattern=r"^excel:"))
     app.add_handler(CallbackQueryHandler(on_colornote_action, pattern=r"^colornote:"))
     app.add_handler(CallbackQueryHandler(on_deck_action, pattern=r"^deck:"))
+    app.add_handler(CallbackQueryHandler(on_pdf_compress, pattern=r"^pdfcompress:"))
+    app.add_handler(CallbackQueryHandler(on_office_pdf_option, pattern=r"^officepdf:"))
     app.add_handler(
         MessageHandler(
             filters.Document.ALL | filters.PHOTO | filters.VOICE | filters.AUDIO,

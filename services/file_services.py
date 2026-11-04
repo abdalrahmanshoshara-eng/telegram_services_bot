@@ -186,6 +186,98 @@ def protect_pdf(source: Path, destination: Path, password: str) -> int:
     return len(reader.pages)
 
 
+# level -> (longest image side in pixels, JPEG quality); None keeps images as-is.
+PDF_COMPRESSION_LEVELS: dict[str, tuple[int, int] | None] = {
+    "lossless": None,
+    "medium": (2000, 70),
+    "strong": (1200, 45),
+}
+
+
+def _recompress_images(writer: PdfWriter, max_side: int, quality: int) -> int:
+    """Shrink and re-encode large photos in place; return how many changed.
+
+    Left alone: images with transparency (re-encoding drops the mask),
+    black-and-white scans (JPEG blurs them and makes them bigger), and any
+    image whose new encoding would not save at least a tenth of its size.
+    """
+    done: set[int] = set()
+    changed = 0
+    for page in writer.pages:
+        try:
+            images = list(page.images)
+        except Exception:
+            continue
+        for image in images:
+            reference = image.indirect_reference
+            if reference is None or reference.idnum in done:
+                continue
+            done.add(reference.idnum)
+            try:
+                stream = reference.get_object()
+                if "/SMask" in stream or "/Mask" in stream or stream.get("/ImageMask"):
+                    continue
+                original_size = len(stream._data)
+                picture = image.image
+                if picture.mode == "P":
+                    picture = picture.convert("RGB")
+                if picture.mode not in {"RGB", "L"}:
+                    continue
+                if max(picture.size) > max_side:
+                    picture = picture.copy()
+                    picture.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                trial = io.BytesIO()
+                picture.save(trial, "JPEG", quality=quality, optimize=True)
+                if trial.tell() > original_size * 0.9:
+                    continue
+                image.replace(picture, quality=quality)
+                changed += 1
+            except Exception:
+                continue  # an unusual image is kept as it was
+    return changed
+
+
+def compress_pdf(source: Path, destination: Path, level: str = "medium") -> dict:
+    """Make a PDF smaller. Returns sizes before and after, and pages and images.
+
+    Content streams are always compressed and duplicate objects merged, which
+    loses nothing. "medium" and "strong" also shrink and re-encode photos.
+    When nothing helps, the original file is returned unchanged.
+    """
+    if level not in PDF_COMPRESSION_LEVELS:
+        raise ServiceInputError("مستوى الضغط غير معروف.")
+    reader = PdfReader(str(source), strict=False)
+    _validate_pdf(reader)
+    writer = PdfWriter(clone_from=reader)
+
+    images = 0
+    settings = PDF_COMPRESSION_LEVELS[level]
+    if settings:
+        images = _recompress_images(writer, *settings)
+    for page in writer.pages:
+        try:
+            page.compress_content_streams()
+        except Exception:
+            pass
+    writer.compress_identical_objects()
+
+    with destination.open("wb") as stream:
+        writer.write(stream)
+    before = source.stat().st_size
+    after = destination.stat().st_size
+    if after > before * 0.99:
+        # Saving under 1% is not worth a re-written file; hand back the original.
+        destination.write_bytes(source.read_bytes())
+        after = before
+    return {
+        "before": before,
+        "after": after,
+        "pages": len(writer.pages),
+        "images": images,
+        "reduced": after < before,
+    }
+
+
 def unprotect_pdf(source: Path, destination: Path, password: str) -> int:
     if not password:
         raise ServiceInputError("أرسل كلمة مرور الملف.")
