@@ -86,6 +86,7 @@ def test_xlsx_is_converted_to_original_result_bundle(tmp_path):
     with zipfile.ZipFile(destination) as archive:
         assert set(archive.namelist()) == {
             "contacts.vcf",
+            "google_contacts.csv",
             "clean_contacts.xlsx",
             "merged_duplicates.xlsx",
             "invalid_rows.xlsx",

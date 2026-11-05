@@ -81,13 +81,14 @@ load_env()
 import config  # noqa: E402
 from services.background_remover import remove_background  # noqa: E402
 from services.colornote import convert_colornote_backups  # noqa: E402
-from services.excel_contacts import convert_excel_contacts  # noqa: E402
+from services.excel_contacts import convert_contacts_files  # noqa: E402
 from services.excel_tools import (  # noqa: E402
     clean_excel_workbook,
     merge_excel_workbooks,
     split_excel_workbook,
 )
 from services.file_services import (  # noqa: E402
+    compress_pdf,
     create_qr_code,
     extract_pdf_pages,
     images_to_pdf,
@@ -112,6 +113,7 @@ from services.voice_note import (  # noqa: E402
 )
 from services.word_formatter import format_word_tables  # noqa: E402
 from services.word_to_excel import word_files_to_excel  # noqa: E402
+from services.office_to_pdf import libreoffice_path, office_to_pdf  # noqa: E402
 
 SESSION_DIR = TemporaryDirectory(prefix="services_ui_")
 RESULTS: dict[str, Path] = {}
@@ -272,21 +274,46 @@ def _run_ocr_image(job: Job) -> dict:
 
 
 def _run_excel_to_vcf(job: Job) -> dict:
+    job.source()  # raises the "send a file" message when nothing was uploaded
     out = job.out("contacts.zip")
-    summary = convert_excel_contacts(
-        job.source(),
+    summary = convert_contacts_files(
+        job.files,
         out,
         job.text("country_code", "963"),
-        job.files[0][0],
         job.out("contacts.vcf"),
     )
     return result(
         download=out,
         summary={
-            "الإجمالي": summary["totalRows"],
-            "المقبولة": summary["validCount"],
+            "الملفات": summary["files"],
+            "السجلات": summary["totalRows"],
+            "الجهات الفريدة": summary["validCount"],
             "المدمجة": summary["duplicateCount"],
             "المرفوضة": summary["invalidCount"],
+        },
+    )
+
+
+def _run_office_to_pdf(job: Job) -> dict:
+    name = job.files[0][0] if job.files else "document"
+    out = job.out(f"{Path(name).stem or 'document'}.pdf")
+    summary = office_to_pdf(
+        job.source(), out, Path(name).suffix, job.text("sheet_layout", "print")
+    )
+    return result(download=out, summary={"عدد الصفحات": summary["pages"]})
+
+
+def _run_compress_pdf(job: Job) -> dict:
+    out = job.out("compressed.pdf")
+    summary = compress_pdf(job.source(), out, job.text("level", "medium"))
+    saved = round((1 - summary["after"] / summary["before"]) * 100)
+    return result(
+        download=out,
+        summary={
+            "الحجم قبل (كيلوبايت)": round(summary["before"] / 1024),
+            "الحجم بعد (كيلوبايت)": round(summary["after"] / 1024),
+            "التوفير": f"{saved}٪" if summary["reduced"] else "الملف مضغوط أصلًا",
+            "الصور المضغوطة": summary["images"],
         },
     )
 
@@ -410,6 +437,39 @@ FORMS: dict[str, dict] = {
             },
         ],
     },
+    "office_to_pdf": {
+        "files": {
+            "accept": ".docx,.xlsx,.pptx",
+            "label": "ملف Word أو Excel أو PowerPoint (DOCX أو XLSX أو PPTX)",
+        },
+        "fields": [
+            {
+                "key": "sheet_layout",
+                "label": "صفحات Excel",
+                "type": "select",
+                "options": [
+                    ["print", "حسب إعدادات الطباعة في الملف"],
+                    ["fit", "كل ورقة في صفحة واحدة"],
+                ],
+                "only_for": ".xlsx",
+            }
+        ],
+    },
+    "compress_pdf": {
+        "files": {"accept": ".pdf", "label": "ملف PDF"},
+        "fields": [
+            {
+                "key": "level",
+                "label": "مستوى الضغط",
+                "type": "select",
+                "options": [
+                    ["medium", "متوسط (مستحسن)"],
+                    ["lossless", "بدون فقدان جودة"],
+                    ["strong", "قوي"],
+                ],
+            }
+        ],
+    },
     "images_to_pdf": {
         "files": {"accept": IMAGE_ACCEPT, "multiple": True, "label": "صور"}
     },
@@ -464,7 +524,11 @@ FORMS: dict[str, dict] = {
     },
     "ocr_image": {"files": {"accept": IMAGE_ACCEPT, "label": "صورة"}},
     "excel_to_vcf": {
-        "files": {"accept": ".xlsx,.xls", "label": "ملف Excel"},
+        "files": {
+            "accept": ".xlsx,.xls,.csv,.txt,.vcf,.docx,.pdf",
+            "multiple": True,
+            "label": "ملفات جهات الاتصال (Excel أو CSV أو TXT أو VCF أو Word أو PDF)",
+        },
         "fields": [
             {
                 "key": "country_code",
@@ -532,6 +596,8 @@ RUNNERS = {
     "split_pdf": _run_split_pdf,
     "manage_pdf_pages": _run_manage_pdf_pages,
     "pdf_password": _run_pdf_password,
+    "compress_pdf": _run_compress_pdf,
+    "office_to_pdf": _run_office_to_pdf,
     "images_to_pdf": _run_images_to_pdf,
     "optimize_image": _run_optimize_image,
     "watermark_pdf": _run_watermark_pdf,
@@ -564,6 +630,7 @@ def service_catalogue() -> list[dict]:
             "kind": service["kind"],
             "url": service.get("url", ""),
             "needs_gemini": service["id"] in NEEDS_GEMINI,
+            "guide": config.SERVICE_GUIDES.get(service["id"], {}),
         }
         entry.update(FORMS.get(service["id"], {}))
         if service["kind"] == "direct" and service["id"] not in RUNNERS:
@@ -675,19 +742,32 @@ PAGE = r"""<!doctype html>
   }
   .header-logo { height:44px; flex-shrink:0; display:flex; align-items:center; }
   .header-logo img { height:100%; max-height:44px; width:auto; display:block; }
-  .header-badges { display:flex; gap:8px; align-items:center; flex-wrap:nowrap; min-width:0; }
-  .header-badge {
-    display:inline-flex; align-items:center; gap:7px; white-space:nowrap;
-    background:rgba(199,166,107,.14); border:1px solid var(--gold-border);
-    color:#ecd9b4; font-size:12px; font-weight:700; padding:6px 14px;
-    border-radius:var(--r-pill); backdrop-filter:blur(4px);
+  /* Service search, in the top bar */
+  .header-search { position:relative; flex:0 1 420px; min-width:0; }
+  .header-search input {
+    width:100%; height:40px; padding:0 40px; font-size:14px; font-weight:600;
+    color:#fff; background:rgba(255,255,255,.10);
+    border:1px solid var(--gold-border); border-radius:var(--r-pill);
+    backdrop-filter:blur(4px);
   }
-  .header-badge::before {
-    content:""; width:6px; height:6px; border-radius:50%; background:var(--gold);
-    flex-shrink:0;
+  .header-search input::placeholder { color:rgba(236,217,180,.75); font-weight:500; }
+  .header-search input:hover { background:rgba(255,255,255,.14); border-color:var(--gold); }
+  .header-search input:focus {
+    background:rgba(255,255,255,.16); border-color:var(--gold-hover); color:#fff;
+    box-shadow:0 0 0 3px rgba(199,166,107,.28);
   }
-  .header-badge.ok::before { background:#5fd3a2; }
-  .header-badge.bad::before { background:#f08a7f; }
+  .header-search input::-webkit-search-cancel-button { filter:invert(1) opacity(.7); cursor:pointer; }
+  .header-search-icon {
+    position:absolute; inset-inline-start:14px; top:50%; transform:translateY(-50%);
+    z-index:1;  /* above the input, whose backdrop blur would smear it */
+    color:var(--gold-hover); pointer-events:none;
+  }
+  .header-search kbd {
+    position:absolute; inset-inline-end:12px; top:50%; transform:translateY(-50%);
+    font:700 11px/1 var(--font); color:var(--gold-hover); padding:3px 7px;
+    border:1px solid rgba(199,166,107,.45); border-radius:6px; pointer-events:none;
+  }
+  .header-search input:focus ~ kbd, .header-search input:not(:placeholder-shown) ~ kbd { display:none; }
 
   /* Shell */
   .app-shell { display:flex; align-items:stretch; }
@@ -782,6 +862,27 @@ PAGE = r"""<!doctype html>
     background:linear-gradient(180deg, var(--gold-hover), var(--gold));
   }
 
+  /* Service guide: what it does, what it takes, what it returns */
+  .guide-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:14px; }
+  .guide-col {
+    background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r-md);
+    padding:14px 16px; min-width:0;
+  }
+  .guide-col h3 {
+    margin:0 0 8px; font-size:14px; font-weight:800; color:var(--green-header);
+    display:flex; align-items:center; gap:8px;
+  }
+  .guide-col h3 .guide-icon {
+    width:26px; height:26px; flex-shrink:0; display:inline-grid; place-items:center;
+    border-radius:var(--r-sm); background:var(--gold-wash); font-size:14px;
+  }
+  .guide-col ul { margin:0; padding-inline-start:18px; display:grid; gap:6px; }
+  .guide-col li { font-size:13.5px; line-height:1.75; color:var(--text); overflow-wrap:anywhere; }
+  .guide-col li::marker { color:var(--gold); }
+  .guide-col.inputs { border-top:3px solid var(--green-soft); }
+  .guide-col.outputs { border-top:3px solid var(--gold); }
+  .guide-col.does { border-top:3px solid var(--green-header); }
+
   /* Forms */
   form { display:grid; gap:16px; }
   label { display:grid; gap:6px; font-weight:700; font-size:13.5px; color:var(--text); }
@@ -814,6 +915,64 @@ PAGE = r"""<!doctype html>
     background:var(--surface); color:var(--green-header); cursor:pointer;
   }
   input[type="file"]::file-selector-button:hover { background:var(--gold-wash); border-color:var(--gold-border); }
+  /* File picker: drop zone and ordered list */
+  .picker { display:grid; gap:8px; font-weight:700; font-size:13.5px; }
+  .visually-hidden {
+    position:absolute !important; width:1px; height:1px; overflow:hidden;
+    clip:rect(0 0 0 0); white-space:nowrap; border:0; padding:0;
+  }
+  .dropzone {
+    display:grid; justify-items:center; gap:4px; padding:22px 16px; text-align:center;
+    border:1.5px dashed var(--border-hard); border-radius:var(--r-lg);
+    background:var(--surface-sunken); cursor:pointer;
+    transition:background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+  }
+  .dropzone:hover { background:var(--gold-wash); border-color:var(--gold); }
+  .dropzone.over { background:var(--green-wash); border-color:var(--green-mid); border-style:solid; }
+  .dropzone.has-files { padding:14px 16px; }
+  .dropzone-icon {
+    width:38px; height:38px; display:grid; place-items:center; border-radius:50%;
+    background:var(--surface); border:1px solid var(--border-strong);
+    color:var(--green-header); font-size:17px;
+  }
+  .dropzone.has-files .dropzone-icon { display:none; }
+  .dropzone-title { font-size:14px; font-weight:800; color:var(--green-header); }
+  .dropzone-sub { font-size:12px; font-weight:500; color:var(--text-muted); }
+  .picker-msg {
+    font-size:12.5px; font-weight:600; color:var(--warning);
+    background:var(--warning-wash); border:1px solid var(--warning-border);
+    border-radius:var(--r-sm); padding:6px 10px;
+  }
+  .picked-list { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+  .picked-list:empty { display:none; }
+  .picked-item {
+    display:flex; align-items:center; gap:8px; min-width:0;
+    padding:7px 8px 7px 10px; border:1px solid var(--border); border-radius:var(--r-md);
+    background:var(--surface);
+  }
+  .picked-item[draggable="true"] { cursor:grab; }
+  .picked-item.dragging { opacity:.45; }
+  .picked-item.drop-target { border-color:var(--gold); box-shadow:0 0 0 2px var(--gold-wash); }
+  .drag-handle { color:var(--text-soft); letter-spacing:-2px; font-size:13px; user-select:none; }
+  .picked-num {
+    flex:0 0 24px; height:24px; display:grid; place-items:center; border-radius:50%;
+    background:var(--green-wash); color:var(--green-header); font-size:12px; font-weight:800;
+  }
+  .picked-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+  .picked-size { flex:0 0 auto; font-size:12px; font-weight:600; color:var(--text-muted); direction:ltr; }
+  .icon-btn {
+    flex:0 0 30px; height:30px; display:grid; place-items:center; padding:0;
+    border:1px solid var(--border); border-radius:var(--r-sm); background:var(--surface-2);
+    color:var(--green-header); font:inherit; font-size:11px; cursor:pointer;
+  }
+  .icon-btn:hover:not(:disabled) { background:var(--gold-wash); border-color:var(--gold-border); }
+  .icon-btn:disabled { opacity:.35; cursor:default; }
+  .icon-btn.rm { color:var(--danger); font-size:12px; }
+
+  /* Search results in the sidebar */
+  .nav-empty { margin:10px 10px 0; font-size:13px; color:rgba(240,235,221,.7); }
+  .nav-link[hidden], .nav-group[hidden] { display:none; }
+
   .file-list { display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; }
   .file-list:empty { display:none; }
   .file-chip {
@@ -885,7 +1044,7 @@ PAGE = r"""<!doctype html>
   }
 
   /* Tables */
-  .table-wrap { margin-top:16px; border:1px solid var(--border); border-radius:var(--r-lg); overflow:hidden; }
+  .table-wrap { margin-top:16px; border:1px solid var(--border); border-radius:var(--r-lg); overflow-x:auto; -webkit-overflow-scrolling:touch; }
   table { width:100%; border-collapse:separate; border-spacing:0; }
   th, td { padding:11px 14px; text-align:start; font-size:13.5px; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
   th {
@@ -904,6 +1063,7 @@ PAGE = r"""<!doctype html>
   }
   pre.trace { direction:ltr; text-align:left; font:12px/1.6 ui-monospace, Consolas, monospace; color:var(--text-muted); }
   .result-actions { margin-top:18px; }
+  .result-actions .btn { max-width:100%; white-space:normal; overflow-wrap:anywhere; text-align:center; }
 
   @media (max-width: 900px) {
     .app-shell { flex-direction:column; }
@@ -921,14 +1081,48 @@ PAGE = r"""<!doctype html>
     }
     .nav-link.active::before { display:none; }
     .nav-link.active { border-color:var(--gold); }
-    .header-badges .header-badge:not(:first-child) { display:none; }
+    .guide-grid { grid-template-columns:minmax(0, 1fr); }
+    .header-search kbd { display:none; }
+    /* Keep the service chips reachable while scrolling a long form. */
+    .app-sidebar {
+      position:sticky; top:var(--header-h); z-index:40;
+      box-shadow:0 8px 18px -14px rgba(4,48,42,.9);
+    }
+    /* Sections reached by scrollIntoView land below the header and the chips. */
+    .hero, .card { scroll-margin-top:calc(var(--header-h) + 72px); }
+    /* 16px stops iOS Safari from zooming into a focused field. */
+    input, textarea, select, .header-search input { font-size:16px; }
   }
   @media (max-width: 520px) {
     .site-header { padding:0 16px; }
-    .header-logo { height:34px; }
-    .header-badges { display:none; }
-    .hero { padding:22px 20px; }
-    .card { padding:18px 16px; }
+    .header-inner { gap:10px; }
+    .header-logo { height:30px; max-width:42%; }
+    .header-logo img { max-width:100%; object-fit:contain; object-position:right center; }
+    .header-search { flex:1 1 auto; }
+    .header-search input { height:36px; font-size:16px; padding:0 34px 0 12px; }
+    .header-search-icon { inset-inline-start:11px; width:16px; height:16px; }
+    .app-sidebar { padding:10px 12px; }
+    .nav-link { padding:7px 12px; font-size:13.5px; }
+    .app-main { padding:16px 12px 32px; }
+    .hero { padding:18px 18px; margin-bottom:14px; border-radius:var(--r-lg); }
+    .hero h1 { font-size:21px; }
+    .hero-accent-line { margin:9px 0 10px; }
+    .hero p { font-size:13.5px; line-height:1.8; }
+    .card { padding:18px 14px; margin-bottom:14px; }
+    .card h2 { font-size:16.5px; margin-bottom:14px; }
+    .guide-col { padding:12px 14px; }
+    textarea { min-height:150px; }
+    .dropzone { padding:18px 12px; }
+    .actions .btn { flex:1 1 100%; }
+    th, td { padding:9px 10px; font-size:13px; }
+    td:first-child { min-width:7.5em; }
+    pre { padding:12px; font-size:13.5px; }
+  }
+  /* Touch screens: no hover, no HTML5 drag-and-drop - use the arrow buttons. */
+  @media (hover: none) and (pointer: coarse) {
+    .drag-handle { display:none; }
+    .icon-btn { flex-basis:38px; height:38px; font-size:13px; }
+    .picked-item { padding:6px 8px; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
@@ -938,11 +1132,10 @@ PAGE = r"""<!doctype html>
   <div class="header-overlay" aria-hidden="true"></div>
   <div class="header-inner">
     <div class="header-logo"><img src="assets/ministry-logo-header.svg" alt="وزارة الصناعة والتجارة الداخلية"></div>
-    <div class="header-badges">
-      <span class="header-badge">بيئة اختبار محلية</span>
-      <span class="header-badge" id="c-model"></span>
-      <span class="header-badge" id="c-key"></span>
-      <span class="header-badge" id="c-ocr"></span>
+    <div class="header-search" role="search">
+      <svg class="header-search-icon" aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.6-4.6"/></svg>
+      <input id="nav-search" type="search" placeholder="ابحث عن خدمة…" aria-label="ابحث عن خدمة" autocomplete="off">
+      <kbd title="اضغط / للبحث">/</kbd>
     </div>
   </div>
 </header>
@@ -955,6 +1148,7 @@ PAGE = r"""<!doctype html>
         <div class="sidebar-sub" id="c-count"></div>
       </div>
     </div>
+    <div class="nav-empty" id="nav-empty" hidden>لا توجد خدمة مطابقة.</div>
     <nav id="nav"></nav>
   </aside>
   <main class="app-main">
@@ -966,9 +1160,10 @@ PAGE = r"""<!doctype html>
         <p id="hero-desc">أدوات لمعالجة المستندات والصور والبيانات في مكان واحد. اختر الخدمة من القائمة، وارفع ملفاتك، واحصل على النتيجة مباشرة.</p>
       </section>
       <div class="notices" id="notices"></div>
+      <section class="card" id="guide" hidden></section>
       <section class="card" id="panel">
         <h2>ابدأ من هنا</h2>
-        <div class="empty">اختر خدمة من القائمة الجانبية.</div>
+        <div class="empty">اختر خدمة من قائمة الخدمات.</div>
       </section>
       <section class="card" id="out" hidden></section>
     </div>
@@ -977,13 +1172,16 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 let SERVICES = [], INFO = {}, current = null;
+let picked = [];  // files chosen for the current service, in processing order
+// Phones and tablets: no drag-and-drop from the file manager, so do not offer it.
+const TOUCH = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
 
 const CATEGORIES = [
   ["platforms", "المنصات الإلكترونية"], ["documents", "المستندات وPDF"],
   ["images", "الصور واستخراج النص"], ["data", "البيانات وجهات الاتصال"],
   ["tools", "أدوات أخرى"],
 ];
-const NEW_SERVICES = new Set(["word_to_excel"]);
+const NEW_SERVICES = new Set(["word_to_excel", "compress_pdf", "office_to_pdf"]);
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -992,22 +1190,15 @@ function el(tag, props, ...children) {
   return node;
 }
 
-function badge(id, text, ok) {
-  const b = $(id);
-  b.textContent = text;
-  b.className = "header-badge " + (ok ? "ok" : "bad");
-}
 
 async function boot() {
   const res = await fetch("api/services");
   const data = await res.json();
   SERVICES = data.services; INFO = data.info;
-  badge("c-model", "النموذج: " + INFO.gemini_model, true);
-  badge("c-key", "مفتاح Gemini: " + (INFO.gemini_key ? "موجود" : "غير موجود"), INFO.gemini_key);
-  badge("c-ocr", "Tesseract: " + (INFO.tesseract ? "مثبّت" : "غير مثبّت"), INFO.tesseract);
   const runnable = SERVICES.filter((s) => s.kind === "direct" && !s.unsupported).length;
   $("c-count").textContent = runnable + " خدمة قابلة للتجربة";
   drawNav();
+  setupSearch();
   const fromHash = decodeURIComponent(location.hash.slice(1));
   if (SERVICES.some((s) => s.id === fromHash)) select(fromHash);
 }
@@ -1024,6 +1215,7 @@ function drawNav() {
         el("span", { className: "nav-label", textContent: s.title }),
         NEW_SERVICES.has(s.id) ? el("span", { className: "nav-new", textContent: "جديد" }) : null);
       b.dataset.id = s.id;
+      b.title = s.title;  // full name on hover, since long titles are cut with "…"
       b.onclick = () => select(s.id);
       nav.append(b);
     }
@@ -1040,8 +1232,32 @@ function select(id) {
   $("out").hidden = true;
   $("hero-title").textContent = (current.emoji ? current.emoji + " " : "") + current.title;
   $("hero-desc").textContent = current.desc || "";
+  drawGuide();
   drawForm();
   if (window.innerWidth <= 900) $("panel").scrollIntoView({ behavior: "smooth" });
+}
+
+function drawGuide() {
+  const g = current.guide || {}, box = $("guide");
+  box.innerHTML = "";
+  const cols = [
+    ["does", "⚙️", "ماذا تفعل الخدمة"],
+    ["inputs", "📥", "المدخلات"],
+    ["outputs", "📤", "المخرجات"],
+  ].filter(([key]) => (g[key] || []).length);
+  box.hidden = !cols.length;
+  if (!cols.length) return;
+  const grid = el("div", { className: "guide-grid" });
+  for (const [key, icon, title] of cols) {
+    const list = el("ul");
+    // Isolate Latin/number runs such as "1-3,5,8" so RTL text does not flip them.
+    for (const item of g[key])
+      list.append(el("li", { textContent: item.replace(/[A-Za-z0-9][A-Za-z0-9.,\-]*[A-Za-z0-9]/g, "⁦$&⁩") }));
+    grid.append(el("div", { className: "guide-col " + key },
+      el("h3", {}, el("span", { className: "guide-icon", textContent: icon }), el("span", { textContent: title })),
+      list));
+  }
+  box.append(el("h2", { textContent: "دليل الخدمة" }), grid);
 }
 
 function notice(kind, text) {
@@ -1067,24 +1283,15 @@ function drawForm() {
   }
   if (s.needs_gemini && !INFO.gemini_key)
     notice("warning", "تحتاج هذه الخدمة مفتاح GEMINI_API_KEY في ملف .env");
+  if (s.id === "office_to_pdf" && !INFO.libreoffice)
+    notice("warning", "LibreOffice غير مثبّت على هذا الجهاز، وستفشل الخدمة. شغّل الصفحة من حاوية Docker.");
   if (s.id === "ocr_image" && !INFO.tesseract)
     notice("warning", "Tesseract غير مثبّت على هذا الجهاز، وستفشل الخدمة.");
 
   p.append(el("h2", { textContent: "مدخلات الخدمة" }));
   const form = el("form", { id: "form" });
-  if (s.files) {
-    const inp = el("input", { type: "file", name: "files", accept: s.files.accept || "", required: true });
-    if (s.files.multiple) inp.multiple = true;
-    const list = el("div", { className: "file-list" });
-    inp.onchange = () => {
-      list.innerHTML = "";
-      for (const f of inp.files) list.append(el("span", { className: "file-chip", textContent: f.name }));
-    };
-    const label = el("label", {}, labelText(s.files.label, true), inp, list);
-    if (s.files.multiple)
-      label.append(el("span", { className: "helper", textContent: "يمكنك اختيار عدة ملفات معاً، وتُعالَج بترتيب الاختيار." }));
-    form.append(label);
-  }
+  picked = [];
+  if (s.files) form.append(filePicker(s.files));
   for (const f of (s.fields || [])) {
     let input;
     if (f.type === "select") {
@@ -1099,13 +1306,187 @@ function drawForm() {
     if (f.value) input.value = f.value;
     if (f.placeholder) input.placeholder = f.placeholder;
     if (f.required) input.required = true;
-    form.append(el("label", {}, labelText(f.label, f.required), input));
+    const label = el("label", {}, labelText(f.label, f.required), input);
+    if (f.only_for) { label.dataset.onlyFor = f.only_for; label.hidden = true; }
+    form.append(label);
   }
   const go = el("button", { type: "submit", className: "btn btn-gold" },
     el("span", { className: "spinner" }), el("span", { className: "go-label", textContent: "شغّل الخدمة" }));
   form.append(el("div", { className: "actions" }, go));
   form.onsubmit = run;
   p.append(form);
+}
+
+// --- file picker: drop zone, ordered list, reordering ---------------------
+
+function sizeText(bytes) {
+  return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+function extOf(name) {
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot).toLowerCase();
+}
+
+function pickerMessage(text) {
+  const box = document.querySelector(".picker-msg");
+  if (box) { box.textContent = text; box.hidden = !text; }
+}
+
+function filePicker(spec) {
+  const allowed = (spec.accept || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const multiple = !!spec.multiple;
+  const input = el("input", { type: "file", name: "files", accept: spec.accept || "", className: "visually-hidden", tabIndex: -1 });
+  input.multiple = multiple;
+  const formats = allowed.map((x) => x.slice(1).toUpperCase()).join("، ");
+  const zone = el("div", { className: "dropzone", tabIndex: 0, role: "button" },
+    el("span", { className: "dropzone-icon", textContent: "⬆", ariaHidden: "true" }),
+    el("span", { className: "dropzone-title", textContent: TOUCH
+      ? (multiple ? "اضغط لاختيار الملفات" : "اضغط لاختيار الملف")
+      : (multiple ? "اسحب الملفات إلى هنا أو اضغط للاختيار" : "اسحب الملف إلى هنا أو اضغط للاختيار") }),
+    el("span", { className: "dropzone-sub", textContent: formats ? "الصيغ المقبولة: " + formats : "" }));
+  zone.setAttribute("aria-label", spec.label);
+  const list = el("ol", { className: "picked-list" });
+  const msg = el("div", { className: "picker-msg", hidden: true });
+  let dragFrom = null;
+
+  function addFiles(files) {
+    const rejected = [];
+    const accepted = [...files].filter((f) => {
+      const ok = !allowed.length || allowed.includes(extOf(f.name));
+      if (!ok) rejected.push(f.name);
+      return ok;
+    });
+    if (!multiple) picked = accepted.slice(0, 1).length ? accepted.slice(0, 1) : picked;
+    else for (const f of accepted)
+      if (!picked.some((p) => p.name === f.name && p.size === f.size)) picked.push(f);
+    pickerMessage(rejected.length ? "تم تجاهل ملفات بصيغة غير مقبولة: " + rejected.join("، ") : "");
+    render();
+  }
+
+  function move(from, to) {
+    if (to < 0 || to >= picked.length || from === to) return;
+    const [file] = picked.splice(from, 1);
+    picked.splice(to, 0, file);
+    render();
+    const buttons = list.querySelectorAll(".picked-item")[to]?.querySelector(from < to ? ".mv-down" : ".mv-up");
+    buttons?.focus();
+  }
+
+  function render() {
+    list.innerHTML = "";
+    picked.forEach((file, i) => {
+      const item = el("li", { className: "picked-item", draggable: multiple },
+        multiple ? el("span", { className: "drag-handle", textContent: "⋮⋮", title: "اسحب لتغيير الترتيب" }) : null,
+        el("span", { className: "picked-num", textContent: String(i + 1) }),
+        el("span", { className: "picked-name", textContent: file.name, title: file.name }),
+        el("span", { className: "picked-size", textContent: sizeText(file.size) }));
+      if (multiple) {
+        const up = el("button", { type: "button", className: "icon-btn mv-up", textContent: "▲", title: "تقديم", disabled: i === 0 });
+        const down = el("button", { type: "button", className: "icon-btn mv-down", textContent: "▼", title: "تأخير", disabled: i === picked.length - 1 });
+        up.setAttribute("aria-label", "تقديم " + file.name);
+        down.setAttribute("aria-label", "تأخير " + file.name);
+        up.onclick = () => move(i, i - 1);
+        down.onclick = () => move(i, i + 1);
+        item.append(up, down);
+        item.addEventListener("dragstart", (e) => { dragFrom = i; item.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); });
+        item.addEventListener("dragend", () => { dragFrom = null; item.classList.remove("dragging"); list.querySelectorAll(".drop-target").forEach((x) => x.classList.remove("drop-target")); });
+        item.addEventListener("dragover", (e) => { if (dragFrom === null) return; e.preventDefault(); item.classList.add("drop-target"); });
+        item.addEventListener("dragleave", () => item.classList.remove("drop-target"));
+        item.addEventListener("drop", (e) => { if (dragFrom === null) return; e.preventDefault(); e.stopPropagation(); move(dragFrom, i); });
+      }
+      const remove = el("button", { type: "button", className: "icon-btn rm", textContent: "✕", title: "إزالة" });
+      remove.setAttribute("aria-label", "إزالة " + file.name);
+      remove.onclick = () => { picked.splice(i, 1); render(); };
+      item.append(remove);
+      list.append(item);
+    });
+    zone.classList.toggle("has-files", picked.length > 0);
+    // Fields that apply to one file type only, e.g. Excel page layout.
+    const exts = new Set(picked.map((f) => extOf(f.name)));
+    document.querySelectorAll("[data-only-for]").forEach((label) => { label.hidden = !exts.has(label.dataset.onlyFor); });
+  }
+
+  zone.onclick = () => input.click();
+  zone.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } };
+  input.onchange = () => { addFiles(input.files); input.value = ""; };
+  for (const type of ["dragenter", "dragover"])
+    zone.addEventListener(type, (e) => { if (dragFrom !== null) return; e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); if (dragFrom === null) addFiles(e.dataTransfer.files); });
+
+  const wrap = el("div", { className: "picker" }, labelText(spec.label, true), zone, input, msg, list);
+  if (multiple)
+    wrap.append(el("span", { className: "helper", textContent: TOUCH ? "تُعالَج الملفات بالترتيب الظاهر. غيّره بالأسهم." : "تُعالَج الملفات بالترتيب الظاهر. غيّره بالسحب أو بالأسهم." }));
+  return wrap;
+}
+
+// --- service search ---------------------------------------------------------
+
+function norm(text) {
+  return String(text || "").toLowerCase()
+    .replace(/[ً-ْـ]/g, "")
+    .replace(/[أإآٱ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/ؤ/g, "و").replace(/ئ/g, "ي")
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+}
+
+// People type product names in Arabic letters; each service whose text
+// mentions the Latin name also answers to these spellings.
+const ALIASES = [
+  ["excel", "اكسل اكسيل"], ["word", "وورد ورد"], ["pdf", "بي دي اف بدف"],
+  ["powerpoint", "باوربوينت بوربوينت باور بوينت"], ["qr", "كيو ار باركود"],
+  ["vcf", "في سي اف"], ["colornote", "كولور نوت"], ["html", "اتش تي ام ال"],
+];
+
+function withAliases(text) {
+  const extra = ALIASES.filter(([latin]) => text.includes(latin)).map(([, arabic]) => norm(arabic));
+  return [text, ...extra].join(" ");
+}
+
+function indexService(s) {
+  const g = s.guide || {};
+  // Title and description first; the guide's longer text only when nothing
+  // matches there, so "ضغط" does not also find "يكفي الضغط على زر".
+  s._main = withAliases(norm([s.title, s.desc].join(" ")));
+  s._full = withAliases(norm([s.title, s.desc, ...(g.does || []), ...(g.inputs || []), ...(g.outputs || [])].join(" ")));
+}
+
+function filterNav() {
+  const words = norm($("nav-search").value).split(/\s+/).filter(Boolean);
+  const matches = (hay) => words.every((w) => hay.includes(w));
+  const field = !words.length || SERVICES.some((s) => matches(s._main)) ? "_main" : "_full";
+  let shown = 0;
+  for (const link of document.querySelectorAll(".nav-link")) {
+    const s = SERVICES.find((x) => x.id === link.dataset.id);
+    const hit = !words.length || matches(s[field]);
+    link.hidden = !hit;
+    if (hit) shown++;
+  }
+  for (const group of document.querySelectorAll(".nav-group")) {
+    let next = group.nextElementSibling, any = false;
+    while (next && next.classList.contains("nav-link")) { if (!next.hidden) any = true; next = next.nextElementSibling; }
+    group.hidden = !any;
+  }
+  $("nav-empty").hidden = shown > 0;
+}
+
+function setupSearch() {
+  for (const s of SERVICES) indexService(s);
+  const box = $("nav-search");
+  box.addEventListener("input", filterNav);
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const first = document.querySelector(".nav-link:not([hidden])");
+      if (first) select(first.dataset.id);
+    } else if (e.key === "Escape") {
+      box.value = ""; filterNav(); box.blur();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if (e.key === "/" && !typing) { e.preventDefault(); box.focus(); box.select(); }
+  });
 }
 
 function labelText(text, required) {
@@ -1118,7 +1499,13 @@ async function run(event) {
   event.preventDefault();
   const form = $("form"), go = form.querySelector("button[type=submit]");
   const goLabel = go.querySelector(".go-label");
+  if (current.files && !picked.length) {
+    pickerMessage(TOUCH ? "اختر ملفًا أولًا." : "اختر ملفًا أولًا، أو اسحبه إلى المربع.");
+    return;
+  }
   const body = new FormData(form);
+  body.delete("files");
+  for (const file of picked) body.append("files", file, file.name);  // in the order shown
   body.append("service", current.id);
   go.disabled = true; goLabel.textContent = "جارٍ التنفيذ...";
   const out = $("out");
@@ -1208,6 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
                         "gemini_model": os.environ.get("GEMINI_MODEL", "غير محدد"),
                         "gemini_key": api_key_present(),
                         "tesseract": tesseract_available(),
+                        "libreoffice": libreoffice_path() is not None,
                         "ocr_lang": config.OCR_LANG,
                     },
                 }
@@ -1315,6 +1703,7 @@ def main() -> None:
     print(f"Gemini model : {os.environ.get('GEMINI_MODEL', 'unset')}")
     print(f"Gemini key   : {'present' if api_key_present() else 'MISSING'}")
     print(f"Tesseract    : {'present' if tesseract_available() else 'MISSING'}")
+    print(f"LibreOffice  : {'present' if libreoffice_path() else 'MISSING'}")
     print(f"Open         : http://{args.host}:{args.port}\n")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)

@@ -14,23 +14,30 @@ REQUIRED_COLUMNS = [FULL_NAME, PHONE]
 OPTIONAL_COLUMNS = [EMAIL]
 EXPECTED_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
-VALID_COLUMNS = EXPECTED_COLUMNS
+EXTRA_PHONES = "أرقام إضافية"
+VALID_COLUMNS = EXPECTED_COLUMNS + [EXTRA_PHONES]
+# "Location" is a worksheet row, a line of text, a vCard or a table row, and
+# carries the file name when several files are processed together.
+LOCATION = "الموقع"
+DUPLICATE_LOCATION = "موقع المكرر"
+KEPT_LOCATION = "موقع المحتفظ به"
 DUPLICATE_COLUMNS = [
-    "صف Excel المكرر",
+    DUPLICATE_LOCATION,
     "الاسم الكامل المكرر",
     PHONE,
     "البريد الالكتروني المكرر",
-    "صف Excel المحتفظ به",
+    KEPT_LOCATION,
     "الاسم المحتفظ به",
     "ملاحظة",
 ]
 INVALID_COLUMNS = [
-    "صف Excel",
+    LOCATION,
     FULL_NAME,
     "رقم التواصل الأصلي",
     "البريد الالكتروني الأصلي",
     "سبب الاستبعاد",
 ]
+MAX_PHONES_PER_CONTACT = 10
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -117,72 +124,138 @@ def clean_email(value) -> str:
     return email
 
 
+def _records(rows: list[dict]) -> list[dict]:
+    """Group rows into contact records.
+
+    A reader emits one row per phone number, so a vCard, a CSV line or a text
+    line holding two numbers arrives as two rows with the same `_row` and
+    `_source`. Rows without `_row` (Excel) are each their own record.
+    """
+    records: list[dict] = []
+    for index, row in enumerate(rows):
+        location = row.get("_row", index + 2)
+        key = (row.get("_source"), location) if "_row" in row else None
+        name = "" if is_empty(row.get(FULL_NAME)) else str(row[FULL_NAME]).strip()
+        if key is not None and records and records[-1]["key"] == key:
+            record = records[-1]
+        else:
+            record = {"key": key, "location": location, "name": name,
+                      "phones": [], "email": None}
+            records.append(record)
+        record["phones"].append(row.get(PHONE))
+        if record["email"] is None and not is_empty(row.get(EMAIL)):
+            record["email"] = row.get(EMAIL)
+    return records
+
+
+def _invalid(location, name, phone, email, reasons: list[str]) -> dict:
+    return {
+        LOCATION: location,
+        FULL_NAME: name,
+        "رقم التواصل الأصلي": value_to_text(phone),
+        "البريد الالكتروني الأصلي": "" if is_empty(email) else str(email).strip(),
+        "سبب الاستبعاد": " | ".join(reasons),
+    }
+
+
 def process_contact_rows(rows: list[dict], country_code="963") -> dict:
-    valid_rows: list[dict] = []
+    """Validate, merge and classify contacts.
+
+    One contact keeps all of its numbers. Two records that share a number are
+    the same person, wherever they came from: the later one is merged into the
+    first, and any numbers it adds are kept on that first contact.
+    """
+    contacts: list[dict] = []
     duplicate_rows: list[dict] = []
     invalid_rows: list[dict] = []
-    seen_phones: dict[str, dict] = {}
+    owner_of: dict[str, dict] = {}  # normalized phone -> contact
 
-    for index, row in enumerate(rows):
-        excel_row = index + 2
-        name = "" if is_empty(row.get(FULL_NAME)) else str(row[FULL_NAME]).strip()
-        raw_phone = row.get(PHONE)
-        raw_email = row.get(EMAIL)
+    records = _records(rows)
+    for record in records:
+        location, name, raw_email = record["location"], record["name"], record["email"]
         reasons: list[str] = []
-
         if not name:
             reasons.append("الاسم الكامل فارغ")
         try:
-            normalized_phone = normalize_phone(raw_phone, country_code)
+            email = clean_email(raw_email)
         except ValueError as error:
-            normalized_phone = ""
-            reasons.append(str(error))
-        try:
-            normalized_email = clean_email(raw_email)
-        except ValueError as error:
-            normalized_email = ""
+            email = ""
             reasons.append(str(error))
 
-        if reasons:
+        phones: list[str] = []
+        bad_phones: list[tuple[object, str]] = []
+        for raw_phone in record["phones"]:
+            try:
+                phone = normalize_phone(raw_phone, country_code)
+            except ValueError as error:
+                bad_phones.append((raw_phone, str(error)))
+                continue
+            if phone not in phones:
+                phones.append(phone)
+
+        if reasons or not phones:
+            if not phones:
+                reasons += [reason for _, reason in bad_phones] or ["رقم التواصل فارغ"]
+            raw = " | ".join(value_to_text(p) for p in record["phones"] if not is_empty(p))
+            invalid_rows.append(_invalid(location, name, raw, raw_email, reasons))
+            continue
+        # A contact with one good number and one broken one keeps the good one;
+        # the broken one is still listed for review.
+        for raw_phone, reason in bad_phones:
             invalid_rows.append(
-                {
-                    "صف Excel": excel_row,
-                    FULL_NAME: name,
-                    "رقم التواصل الأصلي": value_to_text(raw_phone),
-                    "البريد الالكتروني الأصلي": (
-                        "" if is_empty(raw_email) else str(raw_email).strip()
-                    ),
-                    "سبب الاستبعاد": " | ".join(reasons),
-                }
+                _invalid(location, name, raw_phone, raw_email,
+                         [f"{reason} (تم حفظ الجهة بأرقامها الأخرى)"])
             )
+
+        target = next((owner_of[p] for p in phones if p in owner_of), None)
+        if target is None:
+            contact = {FULL_NAME: name, "phones": phones[:MAX_PHONES_PER_CONTACT],
+                       EMAIL: email, "location": location}
+            contacts.append(contact)
+            for phone in contact["phones"]:
+                owner_of.setdefault(phone, contact)
             continue
 
-        if normalized_phone in seen_phones:
-            first = seen_phones[normalized_phone]
-            duplicate_rows.append(
-                {
-                    "صف Excel المكرر": excel_row,
-                    "الاسم الكامل المكرر": name,
-                    PHONE: normalized_phone,
-                    "البريد الالكتروني المكرر": normalized_email,
-                    "صف Excel المحتفظ به": first["excel_row"],
-                    "الاسم المحتفظ به": first["name"],
-                    "ملاحظة": "تم الاحتفاظ بأول ظهور وتجاهل هذا التكرار",
-                }
-            )
-            continue
-
-        seen_phones[normalized_phone] = {"excel_row": excel_row, "name": name}
-        valid_rows.append(
-            {FULL_NAME: name, PHONE: normalized_phone, EMAIL: normalized_email}
+        added = [p for p in phones if p not in target["phones"]]
+        room = MAX_PHONES_PER_CONTACT - len(target["phones"])
+        added = added[: max(0, room)]
+        target["phones"].extend(added)
+        for phone in added:
+            owner_of.setdefault(phone, target)
+        if not target[EMAIL] and email:
+            target[EMAIL] = email
+        duplicate_rows.append(
+            {
+                DUPLICATE_LOCATION: location,
+                "الاسم الكامل المكرر": name,
+                PHONE: "، ".join(phones),
+                "البريد الالكتروني المكرر": email,
+                KEPT_LOCATION: target["location"],
+                "الاسم المحتفظ به": target[FULL_NAME],
+                "ملاحظة": (
+                    "تم دمجه مع الجهة المحتفظ بها وإضافة أرقامه الجديدة إليها"
+                    if added
+                    else "تم الاحتفاظ بأول ظهور وتجاهل هذا التكرار"
+                ),
+            }
         )
 
+    valid_rows = [
+        {
+            FULL_NAME: contact[FULL_NAME],
+            PHONE: contact["phones"][0],
+            EMAIL: contact[EMAIL],
+            EXTRA_PHONES: "، ".join(contact["phones"][1:]),
+            "phones": list(contact["phones"]),
+        }
+        for contact in contacts
+    ]
     return {
         "valid_rows": valid_rows,
         "duplicate_rows": duplicate_rows,
         "invalid_rows": invalid_rows,
         "summary": {
-            "totalRows": len(rows),
+            "totalRows": len(records),
             "validCount": len(valid_rows),
             "duplicateCount": len(duplicate_rows),
             "invalidCount": len(invalid_rows),
@@ -212,9 +285,10 @@ def create_vcard(contacts: list[dict], category="WhatsApp Excel Import") -> str:
                 "VERSION:3.0",
                 f"FN;CHARSET=UTF-8:{name}",
                 f"N;CHARSET=UTF-8:;{name};;;",
-                f"TEL;TYPE=CELL:{contact[PHONE]}",
             ]
         )
+        for phone in contact.get("phones") or [contact[PHONE]]:
+            lines.append(f"TEL;TYPE=CELL:{phone}")
         if email:
             lines.append(f"EMAIL;TYPE=INTERNET:{email}")
         lines.extend([f"CATEGORIES:{category}", "END:VCARD"])

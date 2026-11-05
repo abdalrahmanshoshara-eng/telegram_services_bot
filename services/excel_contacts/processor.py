@@ -1,5 +1,6 @@
 """Bounded in-memory Excel parsing and result-archive generation."""
 
+import csv
 import io
 import os
 import re
@@ -13,7 +14,9 @@ from openpyxl.utils import get_column_letter
 
 from .domain import (
     DUPLICATE_COLUMNS,
+    EMAIL,
     EXPECTED_COLUMNS,
+    FULL_NAME,
     INVALID_COLUMNS,
     REQUIRED_COLUMNS,
     VALID_COLUMNS,
@@ -23,6 +26,7 @@ from .domain import (
     process_contact_rows,
     safe_spreadsheet_value,
 )
+from .readers import ContactsReadError, read_contacts
 
 MAX_WORKSHEETS = max(1, int(os.environ.get("MAX_EXCEL_CONTACTS_WORKSHEETS", "20")))
 MAX_ROWS = max(1, int(os.environ.get("MAX_EXCEL_CONTACTS_ROWS", "10000")))
@@ -276,45 +280,105 @@ def _safe_source_filename(filename: str) -> str:
 
 
 def _summary_text(
-    source_filename: str,
-    sheet_name: str,
+    sources: list[tuple[str, str]],
     country_code: str,
     summary: dict,
 ) -> str:
     created_at = datetime.now(UTC).isoformat(timespec="seconds")
-    return "\n".join(
-        [
-            "تقرير تحويل جهات الاتصال",
-            f"تاريخ الإنشاء (UTC): {created_at}",
-            f"الملف المصدر: {_safe_source_filename(source_filename)}",
-            f"ورقة العمل المستخدمة: {sheet_name}",
-            f"إجمالي الصفوف: {summary['totalRows']}",
-            f"جهات الاتصال الفريدة المقبولة: {summary['validCount']}",
-            f"السجلات المكررة التي تم دمجها: {summary['duplicateCount']}",
-            f"الصفوف التي تحتاج مراجعة: {summary['invalidCount']}",
-            "طريقة إزالة التكرار: الاحتفاظ بأول ظهور لكل رقم تواصل بعد توحيد صيغته",
-            f"رمز الدولة الافتراضي للأرقام المحلية: +{country_code}",
-            "",
+    lines = [
+        "تقرير تحويل جهات الاتصال",
+        f"تاريخ الإنشاء (UTC): {created_at}",
+    ]
+    if len(sources) == 1:
+        filename, label = sources[0]
+        lines += [
+            f"الملف المصدر: {_safe_source_filename(filename)}",
+            f"ورقة العمل المستخدمة: {label}",
         ]
-    )
+    else:
+        lines.append(f"الملفات المصدر ({len(sources)}):")
+        lines += [
+            f"  - {_safe_source_filename(filename)}: {label}"
+            for filename, label in sources
+        ]
+    lines += [
+        f"إجمالي السجلات: {summary['totalRows']}",
+        f"جهات الاتصال الفريدة المقبولة: {summary['validCount']}",
+        f"السجلات المكررة التي تم دمجها: {summary['duplicateCount']}",
+        f"الصفوف التي تحتاج مراجعة: {summary['invalidCount']}",
+        "طريقة إزالة التكرار: السجلات التي تشترك برقم بعد توحيد صيغته جهة واحدة، "
+        "يُحتفظ بأول ظهور وتُضاف إليه الأرقام الجديدة",
+        f"رمز الدولة الافتراضي للأرقام المحلية: +{country_code}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
-def process_workbook(
-    data: bytes,
-    extension: str,
-    source_filename: str,
+def _google_csv(contacts: list[dict]) -> bytes:
+    """A CSV in Google Contacts' own import format.
+
+    The whole name goes in "First Name": splitting an Arabic full name into
+    given and family names cannot be done reliably. No BOM: Google would read
+    it as part of the first header.
+    """
+    phone_columns = max((len(c["phones"]) for c in contacts), default=1)
+    header = ["First Name", "Last Name", "E-mail 1 - Label", "E-mail 1 - Value"]
+    for number in range(1, phone_columns + 1):
+        header += [f"Phone {number} - Label", f"Phone {number} - Value"]
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(header)
+    for contact in contacts:
+        email = contact.get(EMAIL, "")
+        row = [contact[FULL_NAME], "", "* Other" if email else "", email]
+        for index in range(phone_columns):
+            phone = contact["phones"][index] if index < len(contact["phones"]) else ""
+            row += ["Mobile" if phone else "", phone]
+        writer.writerow(row)
+    return output.getvalue().encode("utf-8")
+
+
+def read_source(data: bytes, extension: str) -> tuple[list[dict], str]:
+    """Rows and a source label for one file of any supported format."""
+    if extension in {".xlsx", ".xls"}:
+        matrix, sheet_name = (
+            _read_xlsx(data) if extension == ".xlsx" else _read_xls(data)
+        )
+        rows = _extract_rows(matrix)
+        for index, row in enumerate(rows):
+            row["_row"] = index + 2  # the worksheet row, after the header
+        return rows, sheet_name
+    try:
+        return read_contacts(data, extension)
+    except ContactsReadError as error:
+        raise WorkbookValidationError(str(error)) from error
+
+
+def build_result(
+    sources: list[tuple[str, list[dict], str]],
     country_code: str,
 ) -> dict:
-    matrix, sheet_name = (
-        _read_xlsx(data) if extension == ".xlsx" else _read_xls(data)
-    )
-    rows = _extract_rows(matrix)
-    if len(rows) > MAX_ROWS:
+    """Merge the rows of one or more files into the result bundle.
+
+    `sources` holds (file name, rows, label) for each file, in upload order.
+    """
+    rows: list[dict] = []
+    several = len(sources) > 1
+    for index, (filename, file_rows, _) in enumerate(sources):
+        name = _safe_source_filename(filename)
+        for row in file_rows:
+            row["_source"] = index
+            if several:
+                row["_row"] = f"{name} - {row['_row']}"
+            rows.append(row)
+    if len({(r["_source"], str(r["_row"])) for r in rows}) > MAX_ROWS:
         raise WorkbookValidationError(
-            f"الحد الأعلى المدعوم هو {MAX_ROWS:,} صف لكل ملف."
+            f"الحد الأعلى المدعوم هو {MAX_ROWS:,} جهة لكل عملية."
         )
+
     result = process_contact_rows(rows, country_code)
-    vcard_buffer = create_vcard(result["valid_rows"]).encode("utf-8")
+    contacts = result["valid_rows"]
+    vcard_buffer = create_vcard(contacts).encode("utf-8")
 
     archive_buffer = io.BytesIO()
     with zipfile.ZipFile(
@@ -324,12 +388,13 @@ def process_workbook(
         compresslevel=6,
     ) as archive:
         archive.writestr("contacts.vcf", vcard_buffer)
+        archive.writestr("google_contacts.csv", _google_csv(contacts))
         archive.writestr(
             "clean_contacts.xlsx",
             _create_excel_report(
                 "جهات الاتصال الفريدة",
                 VALID_COLUMNS,
-                result["valid_rows"],
+                contacts,
                 "D9EAD3",
             ),
         )
@@ -354,8 +419,7 @@ def process_workbook(
         archive.writestr(
             "summary.txt",
             _summary_text(
-                source_filename,
-                sheet_name,
+                [(filename, label) for filename, _, label in sources],
                 country_code,
                 result["summary"],
             ),
@@ -368,5 +432,16 @@ def process_workbook(
         **result,
         "zip_buffer": zip_buffer,
         "vcard_buffer": vcard_buffer,
-        "source_sheet_name": sheet_name,
+        "source_sheet_name": " | ".join(label for _, _, label in sources),
     }
+
+
+def process_workbook(
+    data: bytes,
+    extension: str,
+    source_filename: str,
+    country_code: str,
+) -> dict:
+    """One file to the result bundle."""
+    rows, label = read_source(data, extension)
+    return build_result([(source_filename, rows, label)], country_code)
