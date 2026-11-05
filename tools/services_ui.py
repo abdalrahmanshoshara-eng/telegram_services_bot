@@ -1044,7 +1044,7 @@ PAGE = r"""<!doctype html>
   }
 
   /* Tables */
-  .table-wrap { margin-top:16px; border:1px solid var(--border); border-radius:var(--r-lg); overflow:hidden; }
+  .table-wrap { margin-top:16px; border:1px solid var(--border); border-radius:var(--r-lg); overflow-x:auto; -webkit-overflow-scrolling:touch; }
   table { width:100%; border-collapse:separate; border-spacing:0; }
   th, td { padding:11px 14px; text-align:start; font-size:13.5px; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
   th {
@@ -1063,6 +1063,7 @@ PAGE = r"""<!doctype html>
   }
   pre.trace { direction:ltr; text-align:left; font:12px/1.6 ui-monospace, Consolas, monospace; color:var(--text-muted); }
   .result-actions { margin-top:18px; }
+  .result-actions .btn { max-width:100%; white-space:normal; overflow-wrap:anywhere; text-align:center; }
 
   @media (max-width: 900px) {
     .app-shell { flex-direction:column; }
@@ -1082,6 +1083,15 @@ PAGE = r"""<!doctype html>
     .nav-link.active { border-color:var(--gold); }
     .guide-grid { grid-template-columns:minmax(0, 1fr); }
     .header-search kbd { display:none; }
+    /* Keep the service chips reachable while scrolling a long form. */
+    .app-sidebar {
+      position:sticky; top:var(--header-h); z-index:40;
+      box-shadow:0 8px 18px -14px rgba(4,48,42,.9);
+    }
+    /* Sections reached by scrollIntoView land below the header and the chips. */
+    .hero, .card { scroll-margin-top:calc(var(--header-h) + 72px); }
+    /* 16px stops iOS Safari from zooming into a focused field. */
+    input, textarea, select, .header-search input { font-size:16px; }
   }
   @media (max-width: 520px) {
     .site-header { padding:0 16px; }
@@ -1089,10 +1099,30 @@ PAGE = r"""<!doctype html>
     .header-logo { height:30px; max-width:42%; }
     .header-logo img { max-width:100%; object-fit:contain; object-position:right center; }
     .header-search { flex:1 1 auto; }
-    .header-search input { height:36px; font-size:13px; padding:0 34px 0 12px; }
+    .header-search input { height:36px; font-size:16px; padding:0 34px 0 12px; }
     .header-search-icon { inset-inline-start:11px; width:16px; height:16px; }
-    .hero { padding:22px 20px; }
-    .card { padding:18px 16px; }
+    .app-sidebar { padding:10px 12px; }
+    .nav-link { padding:7px 12px; font-size:13.5px; }
+    .app-main { padding:16px 12px 32px; }
+    .hero { padding:18px 18px; margin-bottom:14px; border-radius:var(--r-lg); }
+    .hero h1 { font-size:21px; }
+    .hero-accent-line { margin:9px 0 10px; }
+    .hero p { font-size:13.5px; line-height:1.8; }
+    .card { padding:18px 14px; margin-bottom:14px; }
+    .card h2 { font-size:16.5px; margin-bottom:14px; }
+    .guide-col { padding:12px 14px; }
+    textarea { min-height:150px; }
+    .dropzone { padding:18px 12px; }
+    .actions .btn { flex:1 1 100%; }
+    th, td { padding:9px 10px; font-size:13px; }
+    td:first-child { min-width:7.5em; }
+    pre { padding:12px; font-size:13.5px; }
+  }
+  /* Touch screens: no hover, no HTML5 drag-and-drop - use the arrow buttons. */
+  @media (hover: none) and (pointer: coarse) {
+    .drag-handle { display:none; }
+    .icon-btn { flex-basis:38px; height:38px; font-size:13px; }
+    .picked-item { padding:6px 8px; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
@@ -1133,7 +1163,7 @@ PAGE = r"""<!doctype html>
       <section class="card" id="guide" hidden></section>
       <section class="card" id="panel">
         <h2>ابدأ من هنا</h2>
-        <div class="empty">اختر خدمة من القائمة الجانبية.</div>
+        <div class="empty">اختر خدمة من قائمة الخدمات.</div>
       </section>
       <section class="card" id="out" hidden></section>
     </div>
@@ -1143,6 +1173,8 @@ PAGE = r"""<!doctype html>
 const $ = (id) => document.getElementById(id);
 let SERVICES = [], INFO = {}, current = null;
 let picked = [];  // files chosen for the current service, in processing order
+// Phones and tablets: no drag-and-drop from the file manager, so do not offer it.
+const TOUCH = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
 
 const CATEGORIES = [
   ["platforms", "المنصات الإلكترونية"], ["documents", "المستندات وPDF"],
@@ -1309,7 +1341,9 @@ function filePicker(spec) {
   const formats = allowed.map((x) => x.slice(1).toUpperCase()).join("، ");
   const zone = el("div", { className: "dropzone", tabIndex: 0, role: "button" },
     el("span", { className: "dropzone-icon", textContent: "⬆", ariaHidden: "true" }),
-    el("span", { className: "dropzone-title", textContent: multiple ? "اسحب الملفات إلى هنا أو اضغط للاختيار" : "اسحب الملف إلى هنا أو اضغط للاختيار" }),
+    el("span", { className: "dropzone-title", textContent: TOUCH
+      ? (multiple ? "اضغط لاختيار الملفات" : "اضغط لاختيار الملف")
+      : (multiple ? "اسحب الملفات إلى هنا أو اضغط للاختيار" : "اسحب الملف إلى هنا أو اضغط للاختيار") }),
     el("span", { className: "dropzone-sub", textContent: formats ? "الصيغ المقبولة: " + formats : "" }));
   zone.setAttribute("aria-label", spec.label);
   const list = el("ol", { className: "picked-list" });
@@ -1383,7 +1417,7 @@ function filePicker(spec) {
 
   const wrap = el("div", { className: "picker" }, labelText(spec.label, true), zone, input, msg, list);
   if (multiple)
-    wrap.append(el("span", { className: "helper", textContent: "تُعالَج الملفات بالترتيب الظاهر. غيّره بالسحب أو بالأسهم." }));
+    wrap.append(el("span", { className: "helper", textContent: TOUCH ? "تُعالَج الملفات بالترتيب الظاهر. غيّره بالأسهم." : "تُعالَج الملفات بالترتيب الظاهر. غيّره بالسحب أو بالأسهم." }));
   return wrap;
 }
 
@@ -1466,7 +1500,7 @@ async function run(event) {
   const form = $("form"), go = form.querySelector("button[type=submit]");
   const goLabel = go.querySelector(".go-label");
   if (current.files && !picked.length) {
-    pickerMessage("اختر ملفًا أولًا، أو اسحبه إلى المربع.");
+    pickerMessage(TOUCH ? "اختر ملفًا أولًا." : "اختر ملفًا أولًا، أو اسحبه إلى المربع.");
     return;
   }
   const body = new FormData(form);
