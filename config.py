@@ -56,15 +56,6 @@ SERVICES = [
         "url": "https://reportnest.moid.gov.sy/login",
     },
     {
-        "id": "cardnest",
-        "category": "platforms",
-        "kind": "link",
-        "title": "منصة حفظ الكروت الشخصية",
-        "emoji": "🪪",
-        "desc": "منصة حفظ بيانات البطاقات الشخصية وأرشفتها والرجوع إليها.",
-        "url": "https://cardnest.moid.gov.sy/login",
-    },
-    {
         "id": "format_word",
         "category": "documents",
         "kind": "direct",
@@ -297,14 +288,6 @@ SERVICE_GUIDES = {
         ],
         "inputs": ["لا شيء. يكفي الضغط على زر فتح المنصة."],
         "outputs": ["صفحة تسجيل الدخول إلى منصة إعداد العقود."],
-    },
-    "cardnest": {
-        "does": [
-            "تفتح منصة حفظ الكروت الشخصية في المتصفح.",
-            "لا يعالج البوت أي ملف في هذه الخدمة.",
-        ],
-        "inputs": ["لا شيء. يكفي الضغط على زر فتح المنصة."],
-        "outputs": ["صفحة تسجيل الدخول إلى منصة حفظ الكروت الشخصية."],
     },
     "format_word": {
         "does": [
